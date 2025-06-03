@@ -1,0 +1,19 @@
+
+数据
+- 该文件用于生成数据，测试程序：utils/mock_data.py
+- 自己搞点数据放到对应文件夹
+- 可以自行更改mock_data.py，实现数据导入
+
+对于重建图像，
+- 它的命名一定是：plane_0.000100.jpg
+- 前缀“plane_”+ 重建距离数值（单位是 m）
+
+对于波前、相位
+- 目前不是导进去，是程序模拟生成的:def Make_Wavefront_and_Phase(self)
+- .\HoloLab\utils\mock_data.py
+
+其他
+- 你也可以自行更改/添加函数，实现数据导入
+- 比如说，在 mock_data.py 中增加 def Get_Wavefront_and_Phase(self)
+
+
