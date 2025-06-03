@@ -140,7 +140,7 @@ dmypy.json
 .pyre/
 
 # model
-.pth
-.pkl
-.png
-.jpg
+*.pth
+*.pkl
+*.png
+*.jpg
