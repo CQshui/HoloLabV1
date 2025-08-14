@@ -239,7 +239,7 @@ class SV113Controller:
 
             # 4. 以最高速度(300rpm)正向点动
             max_speed = 300  # rpm
-            jog_duration = 2.0  # 秒
+            jog_duration = 3.5  # 秒
 
             self.jog(direction=0, speed=max_speed)
             self.log_message(f"开始正向点动，速度 {max_speed}rpm，持续 {jog_duration}秒")
@@ -453,6 +453,35 @@ class SV113Controller:
         except Exception as e:
             self.log_message(f"读取位置失败: {str(e)}")
             return 0  # 返回0作为安全值
+
+    def restart_driver(self):
+        """重启驱动器"""
+        try:
+            # 向0x00D4寄存器的BIT15写入1来重启驱动器
+            restart_command = 0x0100  # BIT15 = 1, 其他位为0
+            self._write_word(0x00D4, restart_command)
+            self.log_message("驱动器重启指令已发送")
+            return True
+        except Exception as e:
+            error_msg = str(e).lower()
+            # 检查是否是预期的重启相关错误（连接断开、超时等）
+            expected_errors = [
+                'no response received',
+                'input/output',
+                'timeout',
+                'connection',
+                'retries'
+            ]
+
+            # 如果是预期的重启错误，认为重启成功
+            if any(err in error_msg for err in expected_errors):
+                self.log_message("驱动器重启指令已发送（连接断开属正常现象）")
+                return True
+            else:
+                # 其他未知错误才认为是真正的失败
+                print('unexpected error:', e)
+                self.log_message(f"驱动器重启失败: {str(e)}")
+                return False
 
 
 class MotorControlApp(QMainWindow):
@@ -914,28 +943,32 @@ class MotorControlApp(QMainWindow):
             QMessageBox.warning(self, "点动错误", f"点动控制失败:\n{str(e)}")
 
     def home_motor(self):
-        """强制电机到最高位置"""
+        """重启驱动器作为回零操作"""
         if not self.controller:
             return
 
         try:
-            # 使用新的强制到最高位置方法
-            self.controller.homing()
-            self.log_message("开始强制电机到最高位置")
+            # 直接重启驱动器
+            if self.controller.restart_driver():
+                self.log_message("驱动器重启指令已发送")
+                self.status_bar.showMessage("驱动器重启中...")
 
-            # 等待操作完成
-            QTimer.singleShot(3000, self.check_home_completion)  # 3秒后检查完成状态
-            self.status_bar.showMessage("强制到最高位置中...")
+                # 3秒后检查状态
+                QTimer.singleShot(3000, self.check_restart_completion)
+            else:
+                QMessageBox.warning(self, "重启错误", "驱动器重启失败")
 
         except Exception as e:
-            self.log_message(f"强制到最高位置失败: {str(e)}")
-            QMessageBox.warning(self, "操作错误", f"强制到最高位置失败:\n{str(e)}")
+            self.log_message(f"驱动器重启失败: {str(e)}")
+            QMessageBox.warning(self, "重启错误", f"驱动器重启失败:\n{str(e)}")
 
-    def check_home_completion(self):
-        """检查强制到最高位置是否完成"""
+    def check_restart_completion(self):
+        """检查驱动器重启是否完成"""
         if self.controller:
-            self.status_bar.showMessage("强制到最高位置完成")
+            self.status_bar.showMessage("驱动器重启完成")
             self.update_status()  # 更新状态显示
+        else:
+            print("重启失败！！")
 
     def stop_motor(self):
         """停止电机"""
