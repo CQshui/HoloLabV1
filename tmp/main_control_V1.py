@@ -235,6 +235,8 @@ class ModbusWorker(threading.Thread):
                             self._homing_motor(device_idx)
                         elif func == 'set_limits':
                             self._set_motor_limits(device_idx, *args, **kwargs)
+                        elif func == 'get_limits':  # 新增：获取限位状态
+                            self._get_motor_limits(device_idx)
                         elif func == 'get_status':
                             self._get_motor_status(device_idx)
 
@@ -543,7 +545,7 @@ class ModbusWorker(threading.Thread):
             print(f"电机状态获取失败: {e}")
 
 
-class SinglePumpControl(QWidget):
+class SinglePumpControlWidget(QWidget):
     def __init__(self, pump_idx, command_queue, signals):
         super().__init__()
         self.pump_idx = pump_idx
@@ -929,8 +931,7 @@ class ValveControlWidget(QWidget):
             self.valve_status_label.setText(f"状态: {message}")
 
 
-# 3. 创建电机控制界面类 - 添加新的类
-# 3. 创建电机控制界面类 - 修改为限位功能版本
+# 创建电机控制界面类
 class MotorControlWidget(QWidget):
     def __init__(self, command_queue, signals):
         super().__init__()
@@ -1183,7 +1184,6 @@ class MotorControlWidget(QWidget):
         })
 
     def set_limits(self):
-        print('yes')
         neg_limit = self.neg_limit_spin.value()
         pos_limit = self.pos_limit_spin.value()
 
@@ -1198,7 +1198,6 @@ class MotorControlWidget(QWidget):
             'func': 'set_limits',
             'args': (neg_limit, pos_limit)
         })
-        print('1')
 
     def clear_limits(self):
         # 设置一个很大的范围作为清除限位
@@ -1283,6 +1282,7 @@ class MotorControlWidget(QWidget):
             QMessageBox.warning(self, "电机操作失败", message)
 
     def update_status_display(self, status_idx, status):
+        """更新状态显示"""
         if status_idx == self.motor_idx + 1000:  # 电机状态标识
             self.position_label.setText(f"当前位置: {status['position']} 脉冲")
             self.speed_label.setText(f"当前速度: {status['speed']:.1f} rpm")
@@ -1297,7 +1297,13 @@ class MotorControlWidget(QWidget):
             self.status_label.setText(f"状态: {run_status} | {in_pos}")
             self.limit_label.setText(f"限位: 负限位{neg_limit} | 正限位{pos_limit}")
 
-        elif status_idx == self.motor_idx + 2000:  # 限位状态标识
+            # 更新软件限位显示
+            if 'soft_neg_limit' in status and status['soft_neg_limit'] is not None:
+                self.current_neg_limit_label.setText(f"当前负限位: {status['soft_neg_limit']} 脉冲")
+            if 'soft_pos_limit' in status and status['soft_pos_limit'] is not None:
+                self.current_pos_limit_label.setText(f"当前正限位: {status['soft_pos_limit']} 脉冲")
+
+        elif status_idx == self.motor_idx + 2000:  # 单独的限位状态标识
             self.current_neg_limit_label.setText(f"当前负限位: {status['neg_limit']} 脉冲")
             self.current_pos_limit_label.setText(f"当前正限位: {status['pos_limit']} 脉冲")
 
@@ -1333,7 +1339,7 @@ class IntegratedControlApp(QMainWindow):
 
         self.pump_controls = []
         for i in range(2):
-            pump_control = SinglePumpControl(i, self.command_queue, self.signals)
+            pump_control = SinglePumpControlWidget(i, self.command_queue, self.signals)
             self.pump_controls.append(pump_control)
             self.tab_widget.addTab(pump_control, f"泵 #{i + 1}")
 
@@ -1343,7 +1349,7 @@ class IntegratedControlApp(QMainWindow):
         motor_control = MotorControlWidget(self.command_queue, self.signals)
         self.tab_widget.addTab(motor_control, "电机控制")
 
-        # ✅ 新增：系统工况控制页
+        # 系统工况控制页
         scenario_widget = QWidget()
         scenario_layout = QVBoxLayout()
         scenario_widget.setLayout(scenario_layout)
