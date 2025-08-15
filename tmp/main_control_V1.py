@@ -238,7 +238,7 @@ class ModbusWorker(threading.Thread):
                         elif func == 'get_limits':  # 新增：获取限位状态
                             self._get_motor_limits(device_idx)
                         elif func == 'get_status':
-                            self._get_motor_status(device_idx)
+                            self.get_motor_status(device_idx)
 
                 finally:
                     self.command_queue.task_done()
@@ -523,7 +523,7 @@ class ModbusWorker(threading.Thread):
         except Exception as e:
             self.signals.operation_result.emit("motor", motor_idx, False, f"重启失败: {str(e)}")
 
-    def _get_motor_status(self, motor_idx):
+    def get_motor_status(self, motor_idx):
         if motor_idx not in self.motors:
             return
         try:
@@ -538,9 +538,13 @@ class ModbusWorker(threading.Thread):
                 'running': (status >> 8) & 0x03,
                 'in_position': (status >> 12) & 0x01,
                 'neg_limit': (status >> 13) & 0x01,
-                'pos_limit': (status >> 14) & 0x01
+                'pos_limit': (status >> 14) & 0x01,
             }
+            print(motor_status)
             self.signals.status_update.emit(motor_idx + 1000, motor_status)  # 使用1000+作为电机状态标识
+
+            return position
+
         except Exception as e:
             print(f"电机状态获取失败: {e}")
 
@@ -933,13 +937,15 @@ class ValveControlWidget(QWidget):
 
 # 创建电机控制界面类
 class MotorControlWidget(QWidget):
-    def __init__(self, command_queue, signals):
+    def __init__(self, command_queue, signals, worker_ref):
         super().__init__()
         self.command_queue = command_queue
         self.signals = signals
         self.motor_idx = 0
         self.init_ui()
         self.setup_connections()
+        self.worker_ref = worker_ref  # 添加对worker的引用
+
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -1346,7 +1352,7 @@ class IntegratedControlApp(QMainWindow):
         valve_control = ValveControlWidget(self.command_queue, self.signals)
         self.tab_widget.addTab(valve_control, "阀门控制")
 
-        motor_control = MotorControlWidget(self.command_queue, self.signals)
+        motor_control = MotorControlWidget(self.command_queue, self.signals, self.worker)
         self.tab_widget.addTab(motor_control, "电机控制")
 
         # 系统工况控制页
@@ -1355,10 +1361,10 @@ class IntegratedControlApp(QMainWindow):
         scenario_widget.setLayout(scenario_layout)
 
         self.scenarios = {
-            1: {"name": "清洗模式", "description": "V1,V3,V5开,泵1正转50RPM,泵2反转30RPM"},
-            2: {"name": "进料模式", "description": "V2,V4,V6开,双泵正转40RPM"},
-            3: {"name": "反应模式", "description": "V1,V4,V7开,泵1正转30RPM,泵2反转20RPM"},
-            4: {"name": "排放模式", "description": "V3,V6,V8开,双泵反转60RPM"},
+            1: {"name": "测量模式", "description": "V1,V3开,V5开30s关闭,电机上升，相机拍摄，泵1反转5RPM,泵2正转600RPM"},
+            2: {"name": "浆液路清洗", "description": "V2,V3，V5开,电机下降,泵1反转5RPM,泵2正转600RPM，1min后全部关闭"},
+            3: {"name": "沉积流道冲洗", "description": "V4开,电机处于下降位，1min后关闭"},
+
             0: {"name": "全部关闭", "description": "所有阀门关闭,所有泵停止"}
         }
 
@@ -1442,44 +1448,102 @@ class IntegratedControlApp(QMainWindow):
     def activate_full_scenario(self, scenario_id):
         scenarios = {
             1: {
+                'name': "测量模式",
+                'description': "V1,V3开,V5开30s关闭,电机上升，相机拍摄，泵1反转5RPM,泵2正转600RPM",
                 'valves': [
-                    (0x01, 0x000F, 1), (0x01, 0x0006, 0), (0x01, 0x0005, 1),
-                    (0x01, 0x0004, 0), (0x01, 0x0003, 1), (0x01, 0x0002, 0),
-                    (0x01, 0x0001, 0), (0x01, 0x0000, 0)
+                    # 设置阀门模式
+                    (0x01, 0x00A5, 0),  # V1: 普通模式
+                    (0x01, 0x00A4, 0),
+                    (0x01, 0x00A3, 0),  # V3: 普通模式
+                    (0x01, 0x00A2, 0),
+                    (0x01, 0x00A1, 4),  # V5: 开固定时长模式(模式5)
+
+                    # 控制阀门状态
+                    (0x01, 0x000F, 1),  # V1开
+                    (0x01, 0x000E, 0),
+                    (0x01, 0x000D, 1),  # V3开
+                    (0x01, 0x000C, 0),
+                    (0x01, 0x000B, 3001)  # V5开30秒(N=30*100+1=3001)
                 ],
-                'pumps': [(0, True, 50), (1, False, 30)]
+                'pumps': [(0, False, 5), (1, True, 600)],
+                'motor': [
+                    {'func': 'homing'},  # 电机回零
+                    {'func': 'set_limits', 'args': (50000, 60000)},  # 设置限位
+                    {'func': 'jog', 'args': (1, 50)},  # 点动下降直到负限位
+                ]
             },
+
             2: {
+                'name': "浆液路清洗",
+                'description': "V2,V3，V5开,电机下降,泵1反转5RPM,泵2正转600RPM，1min后全部关闭",
                 'valves': [
-                    (0x01, 0x000F, 0), (0x01, 0x0006, 1), (0x01, 0x0005, 0),
-                    (0x01, 0x0004, 1), (0x01, 0x0003, 0), (0x01, 0x0002, 1),
-                    (0x01, 0x0001, 0), (0x01, 0x0000, 0)
+                    # 设置阀门模式
+                    (0x01, 0x00A5, 0),
+                    (0x01, 0x00A4, 4),  # V2: 开固定时长模式
+                    (0x01, 0x00A3, 4),  # V3: 开固定时长模式
+                    (0x01, 0x00A2, 0),
+                    (0x01, 0x00A1, 4),  # V5: 开固定时长模式
+
+                    # 控制阀门状态
+                    (0x01, 0x000F, 0),
+                    (0x01, 0x000E, 6001),  # V2开60秒(N=60*100+1=6001)
+                    (0x01, 0x000D, 6001),  # V3开60秒
+                    (0x01, 0x000C, 0),
+                    (0x01, 0x000B, 6001)  # V5开60秒
                 ],
-                'pumps': [(0, True, 40), (1, True, 40)]
+                'pumps': [(0, False, 5), (1, True, 600)],
+                'timers': [
+                    (60, {'device_type': 'pump', 'device_idx': 0, 'func': 'stop_pump'}),    # todo 这部分定时有点疑问，工况内部还需要定时吗？是否应该切换工况时定时？
+                    (60, {'device_type': 'pump', 'device_idx': 1, 'func': 'stop_pump'})
+                ],
+                'motor': [
+                    {'func': 'set_limits', 'args': (30000, 50000)},  # 设置限位
+                    {'func': 'jog', 'args': (1, 50)},  # 点动下降直到负限位
+                ]
             },
+
             3: {
+                'name': "沉积流道冲洗",
+                'description': "V4开,电机处于下降位，1min后关闭",
                 'valves': [
-                    (0x01, 0x000F, 1), (0x01, 0x0006, 0), (0x01, 0x0005, 0),
-                    (0x01, 0x0004, 1), (0x01, 0x0003, 0), (0x01, 0x0002, 0),
-                    (0x01, 0x0001, 1), (0x01, 0x0000, 0)
+                    # 设置阀门模式
+                    (0x01, 0x00A5, 0),  # V1: 普通模式
+                    (0x01, 0x00A4, 0),
+                    (0x01, 0x00A3, 0),  # V3: 普通模式
+                    (0x01, 0x00A2, 4),  # V4: 开固定时长模式
+                    (0x01, 0x00A1, 0),  # V5: 开普通模式
+                    # 控制阀门状态
+                    (0x01, 0x000F, 0),  # V1关
+                    (0x01, 0x000E, 0),
+                    (0x01, 0x000D, 0),  # V3关
+                    (0x01, 0x000C, 6001),  # V4开60秒(N=60*100+1=6001)
+                    (0x01, 0x000B, 0),  # V5关
+
                 ],
-                'pumps': [(0, True, 30), (1, False, 20)]
+                'pumps': [(0, False, 0), (1, True, 0)],
+                'motor': []  # 电机保持当前位置
             },
-            4: {
-                'valves': [
-                    (0x01, 0x000F, 0), (0x01, 0x0006, 0), (0x01, 0x0005, 1),
-                    (0x01, 0x0004, 0), (0x01, 0x0003, 0), (0x01, 0x0002, 1),
-                    (0x01, 0x0001, 0), (0x01, 0x0000, 1)
-                ],
-                'pumps': [(0, False, 60), (1, False, 60)]
-            },
+
             0: {
                 'valves': [
-                    (0x01, 0x000F, 0), (0x01, 0x0006, 0), (0x01, 0x0005, 0),
-                    (0x01, 0x0004, 0), (0x01, 0x0003, 0), (0x01, 0x0002, 0),
-                    (0x01, 0x0001, 0), (0x01, 0x0000, 0)
+                    # 设置阀门模式
+                    (0x01, 0x00A5, 0),
+                    (0x01, 0x00A4, 0),  # V2: 开固定时长模式
+                    (0x01, 0x00A3, 0),  # V3: 开固定时长模式
+                    (0x01, 0x00A2, 0),
+                    (0x01, 0x00A1, 0),  # V5: 开固定时长模式
+
+                    # 控制阀门状态
+                    (0x01, 0x000F, 0),
+                    (0x01, 0x000E, 0),  # V2开60秒(N=60*100+1=6001)
+                    (0x01, 0x000D, 0),  # V3开60秒
+                    (0x01, 0x000C, 0),
+                    (0x01, 0x000B, 0)  # V5开60秒
                 ],
-                'pumps': [(0, True, 0), (1, True, 0)]
+                'pumps': [(0, True, 0), (1, True, 0)],
+                'motor': [
+                    {'func': 'homing'}  # 电机回零
+                ]
             }
         }
 
@@ -1488,13 +1552,19 @@ class IntegratedControlApp(QMainWindow):
 
         scenario = scenarios[scenario_id]
 
-        # 控制阀门
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.append(
+            f"<font color='blue'>[{timestamp}] 已激活工况 {scenario_id}: {self.scenarios[scenario_id]['name']}</font>")
+
+        # 以下为调试内容，正式版删除，并将timestamp上方注释内容取消注释
+        # 检查阀门控制器是否连接
         self.command_queue.put({
             'device_type': 'valve',
             'device_idx': 0,
             'func': 'control_valves',
             'args': (scenario['valves'],)
         })
+        self.log_text.append(f"<font color='blue'>[{timestamp}] 已发送阀门控制命令</font>")
 
         # 控制泵
         for pump_idx, direction, speed in scenario['pumps']:
@@ -1504,6 +1574,7 @@ class IntegratedControlApp(QMainWindow):
                     'device_idx': pump_idx,
                     'func': 'stop_pump'
                 })
+                self.log_text.append(f"<font color='blue'>[{timestamp}] 已发送停止泵{pump_idx + 1}命令</font>")
             else:
                 self.command_queue.put({
                     'device_type': 'pump',
@@ -1511,10 +1582,91 @@ class IntegratedControlApp(QMainWindow):
                     'func': 'start_pump',
                     'args': (direction, speed)
                 })
+                dir_text = "反转" if direction else "正转"
+                self.log_text.append(
+                    f"<font color='blue'>[{timestamp}] 已启动泵{pump_idx + 1}: {dir_text} {speed}RPM</font>")
 
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_text.append(
-            f"<font color='blue'>[{timestamp}] 已激活工况 {scenario_id}: {self.scenarios[scenario_id]['name']}</font>")
+        # 控制电机
+        # 电机操作 - 重启驱动器
+        if scenario_id == 1 or scenario_id == 0:
+            self.command_queue.put({
+                'device_type': 'motor',
+                'device_idx': 0,
+                'func': 'homing'
+            })
+
+        # 获取电机控制部件
+        for i in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(i)
+            if isinstance(widget, MotorControlWidget):
+                motor_control = widget
+                break
+        else:
+            motor_control = None
+
+        if motor_control:
+            # 等待电机重启完成后执行点动操作
+            # 创建并启动等待线程
+            def execute_jog(params):
+                """
+                执行电机操作序列
+                :param params: scenario['motor']参数，格式如 [{'func': 'set_limits', 'args': (50000, 60000)}, ...]
+                """
+                timestamp = time.strftime("%H:%M:%S")
+                self.log_text.append(f"<font color='blue'>[{timestamp}] 开始执行电机操作序列</font>")
+
+                # 执行每个电机命令
+                for motor_cmd in params:
+                    # 跳过已经执行的homing命令
+                    if motor_cmd['func'] == 'homing':
+                        continue
+
+                    # 发送命令到队列
+                    self.command_queue.put({
+                        'device_type': 'motor',
+                        'device_idx': 0,
+                        'func': motor_cmd['func'],
+                        'args': motor_cmd.get('args', ())
+                    })
+
+                    # 记录日志
+                    args_str = ', '.join(map(str, motor_cmd.get('args', ())))
+                    self.log_text.append(
+                        f"<font color='blue'>[{timestamp}] 发送电机命令: {motor_cmd['func']}({args_str})</font>")
+
+                self.log_text.append(f"<font color='blue'>[{timestamp}] 电机操作序列执行完成</font>")
+
+            def wait_for_position():
+                while True:
+                    try:
+                        # 获取电机状态
+                        status = self.worker.motors[0].get_status()
+                        position = self.worker.motors[0].get_position()
+
+                        # 检查是否达到目标位置
+                        if position >= 60000:
+                            execute_jog(scenario['motor'])
+                            break
+
+                        # 短暂休眠避免CPU占用过高
+                        time.sleep(0.5)
+
+                    except Exception as e:
+                        timestamp = time.strftime("%H:%M:%S")
+                        self.log_text.append(
+                            f"<font color='red'>[{timestamp}] 获取电机状态错误: {str(e)}</font>")
+                        break
+
+            if scenario_id == 1:
+                # 启动等待线程
+                wait_thread = threading.Thread(target=wait_for_position, daemon=True)
+                wait_thread.start()
+
+                timestamp = time.strftime("%H:%M:%S")
+                self.log_text.append(
+                    f"<font color='blue'>[{timestamp}] 等待电机位置达到60000...</font>")
+            else:
+                execute_jog(scenario['motor'])
 
     def log_operation_result(self, device_type, device_idx, success, message):
         color = "green" if success else "red"
