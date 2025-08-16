@@ -1,32 +1,24 @@
-import sys
-from concurrent.futures import ProcessPoolExecutor  # CPU并行化
-from pathlib import Path
-
 from module.hologram import Hologram
-from utils.utils_for_focusing.rcf.data_loader import prepare_image_PIL, convert_to_rgb
-
-# 将项目根目录添加到 sys.path
-root_dir = Path(__file__).parent.parent  # 根据实际情况调整层级
-# print('Check the Root:', root_dir)
-sys.path.append(str(root_dir))
-
-import os
-import time
+from module.config import HoloConfig
 from utils.mock_data import MockData
+from common.constants import unit_cm, unit_mm, unit_um, unit_nm
+
 import numpy as np
-import pywt  # pip install PyWavelets
+import time
+import cv2
+import os
+import pywt
 from scipy.ndimage import uniform_filter
-from torch.utils.data import DataLoader
 
-# HoloTrack
-from utils.utils_for_focusing.final import RCFLoader, rcf_predict
-
-# GPU加速所需库
 try:
     import torch
     import torch.nn.functional as F
+    from torch.utils.data import DataLoader, ConcatDataset
     from pytorch_wavelets import DWTForward, DWTInverse
-    # print("Using CUDA:", print(torch.cuda.is_available()))
+
+    from concurrent.futures import ProcessPoolExecutor  # CPU并行化
+    from pathlib import Path
+
 except Exception as e:
     print(f"[Module] {e}")
 
@@ -34,20 +26,53 @@ from utils.utils_for_focusing.yoloV8.yolo import YOLO
 from utils.utils_for_focusing.sort.kalman_trace_iou_center import Kalman_tracker, Sort
 from utils.utils_for_focusing.rcf.models.RCF import RCF
 from utils.utils_for_focusing.rcf.models.RCF_ASPP import RCF_ASPP
+from utils.utils_for_focusing.final import RCFLoader, rcf_predict, rcf_predict_V1, rcf_predict_V2
+from utils.utils_for_focusing.rcf.data_loader import prepare_image_PIL, convert_to_rgb
 
-import cv2
-from module.config import HoloConfig
+class Focusing_LZM():
+    def __init__(self, hologram, config):
 
+        self.reconstruction = hologram.reconstruction
 
-'''
-1、输入：全息图 中的 重建图像簇（重建完成之后的）self.reconstruction
-2、输出：聚焦完成的图 self.focusing；其中，AI方法
+        self.method         = config.focusing['method']
 
-- 上述这些参数，在Hologram这个类中已经定义，可以直接返回给它的实体
-- 先看看Hologram这个类中有哪些量
+        self.focusing               = None
+        self.focusing_each          = []
+        self.focusing_depth_map     = None
 
-'''
+    def run(self):
+        # if self.method == 'Angular':
+        #     pass
+        # elif self.method == 'WaveLet':
+        #     pass
+        # else:
+        #     self.AutoFocusing_Example()
 
+        image_url = r'D:\Development\HoloLab\test_data\focusing\test.png'
+        image = cv2.imread(image_url, cv2.IMREAD_GRAYSCALE)
+
+        self.focusing = image
+
+        return self.focusing
+
+    def AutoFocusing_Example(self):
+        self.focusing = np.random.rand(50, 50)
+        time.sleep(2)
+
+    def AutoFocusing_WaveLet_CPU(self):
+        a = 1
+    def AutoFocusing_Gradient_Variance_CPU(self):
+        a = 1
+    def AutoFocusing_Machine_Learning_CPU(self):
+        a = 1
+    def AutoFocusing_WaveLet_GPU(self):
+        a = 1
+    def AutoFocusing_Gradient_Variance_GPU(self):
+        a = 1
+    def AutoFocusing_Machine_Learning_GPU(self):
+        a = 1
+
+'''DongJY@2025.06.03'''
 class RCFProcessor:
     def __init__(self, rcf_model, device, stacks, stacks_ori, rcf_scale):
         self.rcf_model = rcf_model
@@ -97,78 +122,128 @@ class get_dataset():
         return img, img_ori
 
 class Focusing:
+    _model_loaded = False
+    _yolo_model = None
+    _rcf_model = None
+
     def __init__(self, hologram, config, **kwargs):
-        self.stack_dict = hologram.reconstruction
-        stack_list = [self.stack_dict[i] for i in self.stack_dict.keys()]
-        # 堆叠为三维数组 (height, width, num)
-        self.stack = np.stack(stack_list, axis=2).astype(np.float64) * 255  # 或 axis=-1
 
-        # self.stack = stack  # 重建图簇，np.array(float32)，位于CPU
-        self.gpu_id = config.focusing['gpu_id']
-        self.cpu_num = config.focusing['cpu_num']     # cpu线程数
+        self.focusing        = None
+        self.focusing_each   = {}
+
+        _reconstruction      = hologram.reconstruction
+        _reconstruction_list = [_reconstruction[i] for i in _reconstruction.keys()]
+        self.stack           = np.stack(_reconstruction_list, axis=2).astype(np.float64) * 255  #(height, width, num)或 axis=-1
+
+        self.method         = config.focusing['method']
+        self.device         = torch.device(config.focusing['device'])
+        self.gpu_id         = config.focusing['gpu_id']
+        self.cpu_num        = config.focusing['cpu_num']        # cpu线程数
+
         self.yoloModel_path = config.focusing['yolo_model_path']
-        self.rcfModel_path = config.focusing['rcf_model_path']
-        self.device = torch.device(config.focusing['device'])
-        self.get_model = config.focusing['get_model']   # 如果为True，将直接给Focus类传入模型本身，而不是根据路径加载模型
-        self.method = config.focusing['method']
-        self.rcf_scale = config.focusing['rcf_scale']       # 用于rcf图像缩放
+        self.rcfModel_path  = config.focusing['rcf_model_path']
+        self.rcf_scale      = config.focusing['rcf_scale']      # 用于rcf图像缩放
 
-        # 检查**kwargs中是否传入了yoloModel参数
+        self.get_model      = config.focusing['get_model']      # 如果为True，将直接给Focus类传入模型本身，而不是根据路径加载模型
+
+        if 1:
+            self.save_action    = config.save_and_load['save_focusing']
+            self.creat_sub_dir  = config.save_and_load['creat_sub_dir']
+
+            self.save_path      = config.save_and_load['data_save_path']
+            self.image_name     = os.path.splitext(config.file_info['image_name'])[0]
+
         if 'yoloModel' in kwargs:
-            self.yoloModel = kwargs['yoloModel']
-            self.rcfModel = kwargs['rcfModel']
+            # 检查**kwargs中是否传入了yoloModel参数
+            self.yoloModel  = kwargs['yoloModel']
+            self.rcfModel   = kwargs['rcfModel']
+        elif not Focusing._model_loaded and self.method in ['AI', 'AI_Wavelet', 'AI_Gradient']:
+            self.load_model()
+            Focusing._model_loaded = True
+        else:
+            self.yoloModel = Focusing._yolo_model
+            self.rcfModel = Focusing._rcf_model
 
-        elif self.method in ['AI', 'AI_Wavelet', 'AI_Gradient']:
-            # 从路径加载模型
-            self.load_yolo_model()
+        '''保留原始对象用于修改'''
+        self._hologram      = hologram
+        self._config        = config
 
     # 执行函数，需要输入方法名称
     def run(self):
-        result = None
 
-        if self.method == 'Wavelet' and self.device.type == 'cpu':
+        if   self.method == 'Wavelet' and self.device.type == 'cpu':
             result = self.AutoFocusing_WaveLet_CPU()
-
-        elif self.method == 'Gradient' and self.device.type == 'cpu':
-            result = self.AutoFocusing_Gradient_Variance_CPU()
-
-        elif self.method == 'AI' and self.device.type == 'cpu':
-            result = self.AutoFocusing_Machine_Learning_CPU()
-
         elif self.method == 'Wavelet' and self.device.type == 'cuda':
             result = self.AutoFocusing_WaveLet_GPU()
 
+        elif self.method == 'Gradient' and self.device.type == 'cpu':
+            result = self.AutoFocusing_Gradient_Variance_CPU()
         elif self.method == 'Gradient' and self.device.type == 'cuda':
             result = self.AutoFocusing_Gradient_Variance_GPU()
 
+        elif self.method == 'AI' and self.device.type == 'cpu':
+            self.AutoFocusing_AI_CPU()
         elif self.method == 'AI' and self.device.type == 'cuda':
-            result = self.AutoFocusing_Machine_Learning_GPU()
+            self.AutoFocusing_AI_GPU()
 
         elif self.method == 'AI_Wavelet' and self.device.type == 'cpu':
-            result = self.AutoFocusing_AI_Wavelet_CPU()
+            result = self.AutoFocusing_Wavelet_AI_CPU()
+        elif self.method == 'AI_Wavelet' and self.device.type == 'cuda':
+            result = self.AutoFocusing_Wavelet_AI_GPU()
 
         elif self.method == 'AI_Gradient' and self.device.type == 'cpu':
-            result = self.AutoFocusing_AI_Gradient_CPU()
-
-        elif self.method == 'AI_Wavelet' and self.device.type == 'cuda':
-            result = self.AutoFocusing_AI_Wavelet_GPU()
-
+            result = self.AutoFocusing_Gradient_Variance_AI_CPU()
         elif self.method == 'AI_Gradient' and self.device.type == 'cuda':
-            result = self.AutoFocusing_AI_Gradient_GPU()
+            result = self.AutoFocusing_Gradient_Variance_AI_GPU()
 
         else:
             print('No such choice!')
 
-        return result
+        self.modify_hologram_and_config()
+        self.save_to_file()
+
+    def modify_hologram_and_config(self):
+        self._hologram.focusing      = self.focusing
+        self._hologram.focusing_each = self.focusing_each
+        self._hologram.status_msg    = f"Focusing Finished."
+    def save_to_file(self):
+
+        if self.creat_sub_dir:
+            save_path = os.path.join(self.save_path, self.image_name)
+            save_path = os.path.join(save_path, 'Focusing')
+        else:
+            save_path = os.path.join(self.save_path, 'Focusing')
+
+        if self.save_action:
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+            # print(f"Save Focusing to {save_path}")
+            '''总体'''
+            # focusing_norm = (self.focusing - np.min(self.focusing)) / (np.max(abs_v) - np.min(abs_v) + 1e-10)
+            save_name       = f"Focusing.png"
+            save_path_file  = os.path.join(save_path, save_name)
+            cv2.imwrite(save_path_file, self.focusing)
+
+            '''子图'''
+            focusing_each = self.focusing_each
+            for _key, _value in focusing_each.items():
+                abs_v = np.abs(_value.copy())
+                normalized = (abs_v - np.min(abs_v)) / (np.max(abs_v) - np.min(abs_v) + 1e-10)
+                focusing_each[_key] = (normalized * 255).astype(np.uint8)  # 转为 [0, 255] 的 uint8
+
+            for _name, image in focusing_each.items():
+                save_name       = f"{_name}.png"
+                save_path_file  = os.path.join(save_path, save_name)
+                cv2.imwrite(save_path_file, image)
 
     # 在没有外部传入模型时，根据模型路径加载模型
-    def load_yolo_model(self):
+    def load_model(self):
         if self.get_model:
             pass
         else:
             # 指定使用的GPU
             os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
-            print(f"Using device: {self.device} (GPU {self.gpu_id})")
+            # print(f"Using device: {self.device} (GPU {self.gpu_id})")
             CUDA_Available = (self.device.type == 'cuda')
             # print(CUDA_Available)
 
@@ -186,6 +261,9 @@ class Focusing:
             self.rcfModel.to(self.device)
             checkpoint = torch.load(self.rcfModel_path, map_location=self.device)
             self.rcfModel.load_state_dict(checkpoint['state_dict'])
+
+            Focusing._yolo_model = self.yoloModel
+            Focusing._rcf_model = self.rcfModel
 
     def AutoFocusing_WaveLet_CPU(self):
         h, w, num_images = self.stack.shape
@@ -284,103 +362,8 @@ class Focusing:
         # 回归原有尺寸
         reconstructed = cv2.resize(reconstructed, (w, h))
 
-        return np.clip(reconstructed, 0, 255).astype(np.uint8)
-
-    def AutoFocusing_Gradient_Variance_CPU(self):
-        images = [self.stack[:, :, i] for i in range(self.stack.shape[2])]
-        window_size = 55  # 与小波方法中的window_size保持一致
-
-        # 计算局部方差
-        var_maps = []
-        kernel = np.ones((window_size, window_size), np.float32) / (window_size ** 2)
-
-        for img in images:
-            img_float = img.astype(np.float32)
-            # img_float = cv2.copyMakeBorder(img_float, window_size // 2, window_size // 2, window_size // 2,
-            #                                 window_size // 2, cv2.BORDER_REFLECT)
-            mean = cv2.filter2D(img_float, -1, kernel)
-            sq_mean = cv2.filter2D(img_float ** 2, -1, kernel)
-            variance = sq_mean - mean ** 2
-            var_maps.append(variance)
-
-        # 选择方差最大的图像进行融合
-        var_stack = np.dstack(var_maps)
-        max_indices = np.argmax(var_stack, axis=2)
-
-        # 融合图像
-        fused = np.zeros_like(images[0], dtype=np.float32)
-        for n in range(len(images)):
-            mask = (max_indices == n)
-            fused[mask] = images[n][mask]
-
-        return np.clip(fused, 0, 255).astype(np.uint8)
-
-    def AutoFocusing_Machine_Learning_CPU(self, get_position=False):
-        # 设置CPU并行计算
-        torch.set_num_threads(self.cpu_num)      # todo 改掉，用多进程而不是多线程
-        torch.backends.openmp.enabled = True
-        torch.backends.mkldnn.enabled = True  # 启用MKL-DNN加速
-
-        # 颗粒子图拼接函数
-        def create_square_mosaic(images, fill_value=128):
-            """（保持不变）"""
-            if not images:
-                return None
-
-            heights = [img.shape[0] for img in images]
-            widths = [img.shape[1] for img in images]
-            max_height = max(heights)
-            max_width = max(widths)
-
-            num_images = len(images)
-            num_rows = int(np.sqrt(num_images))
-            num_cols = (num_images + num_rows - 1) // num_rows
-
-            mosaic_height = num_rows * max_height
-            mosaic_width = num_cols * max_width
-            mosaic = np.full((mosaic_height, mosaic_width), fill_value, dtype=np.uint8)
-
-            for idx, img in enumerate(images):
-                height, width = img.shape
-                row = idx // num_cols
-                col = idx % num_cols
-                start_row = row * max_height
-                start_col = col * max_width
-                mosaic[start_row:start_row + height, start_col:start_col + width] = img
-
-            return mosaic
-
-        focused_particles = []
-
-        # 颗粒追踪, 耗费19s
-        mot_tracker = Sort(max_age=15, min_hits=3, iou_threshold=0.3, distance_threshold=30)
-        tracker = Kalman_tracker(image_folder=None,
-                                 output_folder=None,
-                                 yolo_model=self.yoloModel,
-                                 sort=mot_tracker,
-                                 image_stack=self.stack,
-                                 device=self.device)
-
-        if get_position:
-            stacks, stacks_ori, names, positions = tracker.get_stacks(
-                get_position=get_position)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
-        else:
-            stacks, stacks_ori, names = tracker.get_stacks()
-
-        # 并行化 RCF 模型的预测
-        # 创建 RCFProcessor 实例
-        processor = RCFProcessor(self.rcfModel, self.device, stacks, stacks_ori, rcf_scale=self.rcf_scale)
-
-        # 使用 ProcessPoolExecutor.map 并行处理
-        with ProcessPoolExecutor(max_workers=self.cpu_num) as executor:
-            focused_particles = list(executor.map(processor.process_stack, range(len(stacks))))
-
-        mosaic = create_square_mosaic(focused_particles)
-
-        if get_position:
-            return focused_particles, positions
-        else:
-            return mosaic
+        self.focusing = np.clip(reconstructed, 0, 255).astype(np.uint8)
+        return self.focusing
 
     def AutoFocusing_WaveLet_GPU(self):
         # print(torch.cuda.is_available())  # 应输出True才能使用GPU
@@ -461,42 +444,215 @@ class Focusing:
         result = F.interpolate(result, size=(h, w), mode='bicubic', align_corners=False)
         result = result.squeeze().cpu().numpy()
         result = cv2.resize(result, (w, h))
-        return np.clip(result, 0, 255).astype(np.uint8)
 
-    def AutoFocusing_Gradient_Variance_GPU(self):
+        self.focusing = np.clip(result, 0, 255).astype(np.uint8)
+        return self.focusing
+
+    def AutoFocusing_Wavelet_AI_CPU(self):
+        wavelet_processed = self.AutoFocusing_WaveLet_CPU()
+        # wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
+        particles, positions = self.AutoFocusing_AI_CPU(
+            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+
+        for i in range(len(particles)):
+            # 提取位置信息
+            left, top, right, bottom = positions[i]
+            if (bottom - top) * (right - left) > 1600:
+                # 提取对应的颗粒图像
+                particle = particles[i].astype(np.uint8)
+
+                wavelet_processed[top:bottom, left:right] = particle
+
+        self.focusing = wavelet_processed
+
+    def AutoFocusing_Wavelet_AI_GPU(self):
+        wavelet_processed = self.AutoFocusing_WaveLet_GPU()
+        # wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
+        particles, positions = self.AutoFocusing_AI_GPU(
+            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+
+        for i in range(len(particles)):
+            # 提取位置信息
+            left, top, right, bottom = positions[i]
+            if (bottom - top) * (right - left) > 1600:
+                # 提取对应的颗粒图像
+                particle = particles[i].astype(np.uint8)
+
+                wavelet_processed[top:bottom, left:right] = particle
+
+        self.focusing = wavelet_processed
+
+    def AutoFocusing_Gradient_Variance_CPU(self):
         images = [self.stack[:, :, i] for i in range(self.stack.shape[2])]
         window_size = 55  # 与小波方法中的window_size保持一致
 
-        # 将数据转移到GPU
-        device = torch.device('cuda')
-        images_gpu = [torch.from_numpy(img.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device) for img in images]
-
         # 计算局部方差
-        kernel = torch.ones((1, 1, window_size, window_size), dtype=torch.float32).to(device) / (window_size ** 2)
         var_maps = []
+        kernel = np.ones((window_size, window_size), np.float32) / (window_size ** 2)
 
-        for img in images_gpu:
-            mean = F.conv2d(img, kernel, padding=window_size // 2)
-            sq_mean = F.conv2d(img ** 2, kernel, padding=window_size // 2)
+        for img in images:
+            img_float = img.astype(np.float32)
+            # img_float = cv2.copyMakeBorder(img_float, window_size // 2, window_size // 2, window_size // 2,
+            #                                 window_size // 2, cv2.BORDER_REFLECT)
+            mean = cv2.filter2D(img_float, -1, kernel)
+            sq_mean = cv2.filter2D(img_float ** 2, -1, kernel)
             variance = sq_mean - mean ** 2
-            var_maps.append(variance.squeeze(1))  # 移除通道维度
+            var_maps.append(variance)
 
         # 选择方差最大的图像进行融合
-        var_stack = torch.stack(var_maps, dim=-1)  # (batch, h, w, num_images)
-        max_indices = torch.argmax(var_stack, dim=-1)  # (batch, h, w)
+        var_stack = np.dstack(var_maps)
+        max_indices = np.argmax(var_stack, axis=2)
 
         # 融合图像
-        fused = torch.zeros_like(images_gpu[0].squeeze(0).squeeze(0), dtype=torch.float32).to(device)
-        for n in range(len(images_gpu)):
-            mask = (max_indices == n).squeeze(0)
-            fused[mask] = images_gpu[n].squeeze(0).squeeze(0)[mask]
+        fused = np.zeros_like(images[0], dtype=np.float32)
+        for n in range(len(images)):
+            mask = (max_indices == n)
+            fused[mask] = images[n][mask]
 
-        # 将结果从GPU转移到CPU
-        fused_cpu = fused.cpu().numpy()
+        self.focusing = np.clip(fused, 0, 255).astype(np.uint8)
+        return self.focusing
 
-        return np.clip(fused_cpu, 0, 255).astype(np.uint8)
+    def AutoFocusing_Gradient_Variance_GPU(self):
+        # 原始数据维度 [H, W, num_images]
+        device = torch.device('cuda')
 
-    def AutoFocusing_Machine_Learning_GPU(self, get_position=False):
+        # 一次性将整个堆栈转移到GPU
+        stack_tensor = torch.from_numpy(self.stack.astype(np.float32)).permute(2, 0, 1).to(device)  # [num_images, H, W]
+        num_images, H, W = stack_tensor.shape
+        window_size = 55
+
+        # 添加通道维度 [num_images, 1, H, W]
+        stack_tensor = stack_tensor.unsqueeze(1)
+
+        # 创建卷积核 - 修正维度问题
+        kernel = torch.ones(1, 1, window_size, window_size, device=device) / (window_size ** 2)
+
+        # 计算均值和平方均值 (移除groups参数)
+        mean = F.conv2d(stack_tensor, kernel, padding=window_size // 2)
+        sq_mean = F.conv2d(stack_tensor ** 2, kernel, padding=window_size // 2)
+
+        # 计算方差 [num_images, 1, H, W]
+        variance = sq_mean - mean ** 2
+
+        # 选择方差最大的图像索引 [H, W]
+        max_indices = torch.argmax(variance.squeeze(1), dim=0)  # 沿图像维度取最大值
+
+        # 使用高级索引直接构建融合图像
+        fused = torch.gather(
+            input=stack_tensor.squeeze(1),  # [num_images, H, W]
+            dim=0,
+            index=max_indices.unsqueeze(0)  # [1, H, W]
+        ).squeeze(0)
+
+        # 移回CPU并转换类型
+        self.focusing = fused.cpu().numpy().astype(np.uint8)
+        return self.focusing
+
+    def AutoFocusing_Gradient_Variance_AI_CPU(self):
+        # wavelet_processed = self.AutoFocusing_WaveLet_GPU()
+        wavelet_processed = self.AutoFocusing_Gradient_Variance_CPU()
+        particles, positions = self.AutoFocusing_AI_CPU(
+            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+
+        for i in range(len(particles)):
+            # 提取位置信息
+            left, top, right, bottom = positions[i]
+            if (bottom - top) * (right - left) > 1600:
+                # 提取对应的颗粒图像
+                particle = particles[i].astype(np.uint8)
+
+                wavelet_processed[top:bottom, left:right] = particle
+
+        self.focusing = wavelet_processed
+
+    def AutoFocusing_Gradient_Variance_AI_GPU(self):
+        # wavelet_processed = self.AutoFocusing_WaveLet_GPU()
+        wavelet_processed    = self.AutoFocusing_Gradient_Variance_GPU()
+
+        particles, positions = self.AutoFocusing_AI_GPU(        # todo
+            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+
+        for i in range(len(particles)):
+            # 提取位置信息
+            left, top, right, bottom = positions[i]
+            if (bottom - top) * (right - left) > 1600:
+                # 提取对应的颗粒图像
+                particle = particles[i].astype(np.uint8)
+
+                wavelet_processed[top:bottom, left:right] = particle
+
+        self.focusing = wavelet_processed
+
+    def AutoFocusing_AI_CPU(self, get_position=False):
+        # 设置CPU并行计算
+        torch.set_num_threads(self.cpu_num)      # todo 改掉，用多进程而不是多线程
+        torch.backends.openmp.enabled = True
+        torch.backends.mkldnn.enabled = True  # 启用MKL-DNN加速
+
+        # 颗粒子图拼接函数
+        def create_square_mosaic(images, fill_value=128):
+            """（保持不变）"""
+            if not images:
+                return None
+
+            heights = [img.shape[0] for img in images]
+            widths = [img.shape[1] for img in images]
+            max_height = max(heights)
+            max_width = max(widths)
+
+            num_images = len(images)
+            num_rows = int(np.sqrt(num_images))
+            num_cols = (num_images + num_rows - 1) // num_rows
+
+            mosaic_height = num_rows * max_height
+            mosaic_width = num_cols * max_width
+            mosaic = np.full((mosaic_height, mosaic_width), fill_value, dtype=np.uint8)
+
+            for idx, img in enumerate(images):
+                height, width = img.shape
+                row = idx // num_cols
+                col = idx % num_cols
+                start_row = row * max_height
+                start_col = col * max_width
+                mosaic[start_row:start_row + height, start_col:start_col + width] = img
+
+            return mosaic
+
+        focused_particles = []
+
+        # 颗粒追踪, 耗费19s
+        mot_tracker = Sort(max_age=15, min_hits=3, iou_threshold=0.3, distance_threshold=30)
+        tracker = Kalman_tracker(image_folder=None,
+                                 output_folder=None,
+                                 yolo_model=self.yoloModel,
+                                 sort=mot_tracker,
+                                 image_stack=self.stack,
+                                 device=self.device)
+
+        if get_position:
+            stacks, stacks_ori, names, positions = tracker.get_stacks(
+                get_position=get_position)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+        else:
+            stacks, stacks_ori, names = tracker.get_stacks()
+
+        # 并行化 RCF 模型的预测
+        # 创建 RCFProcessor 实例
+        processor = RCFProcessor(self.rcfModel, self.device, stacks, stacks_ori, rcf_scale=self.rcf_scale)
+
+        # 使用 ProcessPoolExecutor.map 并行处理
+        with ProcessPoolExecutor(max_workers=self.cpu_num) as executor:
+            focused_particles = list(executor.map(processor.process_stack, range(len(stacks))))
+
+        if get_position:
+            return focused_particles, positions
+        else:
+            # 拼接图
+            self.focusing = create_square_mosaic(focused_particles)
+            # 单个颗粒
+            for i in range(len(focused_particles)):
+                self.focusing_each[str(i)] = focused_particles[i]
+
+    def AutoFocusing_AI_GPU(self, get_position=False):
         # 颗粒子图拼接函数
         def create_square_mosaic(images, fill_value=128):
             """
@@ -550,107 +706,179 @@ class Focusing:
 
         # 颗粒追踪，get_tracks函数耗时3s
         mot_tracker = Sort(max_age=15, min_hits=3, iou_threshold=0.3, distance_threshold=30)
-        tracker = Kalman_tracker(image_folder=None,
-                                 output_folder=None,
-                                 yolo_model=self.yoloModel,
-                                 sort=mot_tracker,
-                                 image_stack=self.stack)
+        tracker = Kalman_tracker(image_folder=None, output_folder=None,
+                                 yolo_model=self.yoloModel, sort=mot_tracker, image_stack=self.stack)
 
         if get_position:
             stacks, stacks_ori, names, positions = tracker.get_stacks(get_position=get_position)    # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
         else:
             stacks, stacks_ori, names = tracker.get_stacks()
 
-        # 显示图像
-        # stacks_ori[1][0].show()
-
         for i, stack in enumerate(stacks):
             stack_ori = stacks_ori[i]
-            # dataset = RCFLoader(stack, stack_ori, k_size=6)
-            # loader = DataLoader(dataset, batch_size=1, num_workers=1, drop_last=True, shuffle=False)
-            # img_tmp, name_tmp = rcf_predict(rcf_model, loader)
-            img_tmp, name_tmp = rcf_predict(self.rcfModel, get_dataset(stack, stack_ori, k_size=self.rcf_scale), device=self.device)
+            # V0
+            # img_tmp, name_tmp = rcf_predict(self.rcfModel, get_dataset(stack, stack_ori, k_size=self.rcf_scale), device=self.device)
 
+            # V1
+            dataset = RCFLoader(stack, stack_ori, k_size=self.rcf_scale)
+            loader = DataLoader(dataset, batch_size=64, num_workers=0, pin_memory=True)
+
+            img_tmp, name_tmp = rcf_predict_V1(self.rcfModel, loader, device=self.device)
             img_tmp = torch.squeeze(img_tmp.squeeze()).cpu().numpy()
             focused_particles.append(img_tmp)  # 聚焦颗粒图像列表, note
 
             # 保存显示
             # cv2.imwrite(os.path.join(r'F:\dongjiayao\Data\HoloLab_testData\autofocus\ai_output', "{}.jpg".format(i)), img_tmp)
 
-        # 颗粒子图拼接
-        mosaic = create_square_mosaic(focused_particles)
-
         if get_position:
             return focused_particles, positions
         else:
+            # 拼接图
+            self.focusing = create_square_mosaic(focused_particles)
+            # 单个颗粒
+            for i in range(len(focused_particles)):
+                self.focusing_each[str(i)] = focused_particles[i]
+
+    def AutoFocusing_AI_GPU_V1(self, get_position: bool = False):
+        """一次性完成所有颗粒的自动聚焦，输出每个颗粒的最清晰图像
+        参数
+        ----
+        get_position : bool
+            若为 True，则同时返回各颗粒在原始帧中的坐标。
+        返回
+        ----
+        focused_particles : List[np.ndarray]
+            每颗粒 1 张聚焦图（与原 img 相同尺寸）。
+        positions : List[Tuple[int, int, int, int]]  (仅当 get_position 为 True)
+            Sort/Kalman 给出的 (x1, y1, x2, y2) 位置。
+        """
+
+        # --------------------------- 辅助函数 ---------------------------
+        def create_square_mosaic(images, fill_value=128):
+            """把若干单通道图拼成接近正方形的马赛克图，调试/展示用"""
+            if not images:
+                return None
+            heights = [img.shape[0] for img in images]
+            widths = [img.shape[1] for img in images]
+            h_max, w_max = max(heights), max(widths)
+            n = len(images)
+            rows = int(np.ceil(np.sqrt(n)))
+            cols = int(np.ceil(n / rows))
+            mosaic = np.full((rows * h_max, cols * w_max), fill_value, np.uint8)
+
+            for idx, img in enumerate(images):
+                r, c = divmod(idx, cols)
+                h, w = img.shape
+                mosaic[r * h_max: r * h_max + h, c * w_max: c * w_max + w] = img
             return mosaic
 
-    def AutoFocusing_AI_Wavelet_CPU(self):
-        wavelet_processed = self.AutoFocusing_WaveLet_CPU()
-        # wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
-        particles, positions = self.AutoFocusing_Machine_Learning_CPU(get_position=True)    # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+        # --------------------- 颗粒追踪，生成 stack ----------------------
+        mot_tracker = Sort(max_age=15, min_hits=3, iou_threshold=0.3, distance_threshold=30)
+        tracker = Kalman_tracker(
+            image_folder=None,
+            output_folder=None,
+            yolo_model=self.yoloModel,
+            sort=mot_tracker,
+            image_stack=self.stack
+        )
 
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
+        if get_position:
+            stacks, stacks_ori, names, positions = tracker.get_stacks(get_position=True)
+        else:
+            stacks, stacks_ori, names = tracker.get_stacks()
 
-                wavelet_processed[top:bottom, left:right] = particle
+        # ---------------------- 构建数据集列表 --------------------------
+        all_datasets, particle_sizes = [], []
+        H_max, W_max = 0, 0
+        for stack, stack_ori in zip(stacks, stacks_ori):
+            # stack[0] 就代表该颗粒内所有 img 的统一尺寸
+            h_img, w_img = stack[0].shape  # img 尺寸
+            h_ori, w_ori = stack_ori[0].shape  # img_ori 尺寸
 
-        return wavelet_processed
+            H_max = max(H_max, h_img, h_ori)
+            W_max = max(W_max, w_img, w_ori)
 
-    def AutoFocusing_AI_Gradient_CPU(self):
-        # wavelet_processed = self.AutoFocusing_WaveLet_GPU()
-        wavelet_processed = self.AutoFocusing_Gradient_Variance_CPU()
-        particles, positions = self.AutoFocusing_Machine_Learning_CPU(get_position=True)    # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+            ds = RCFLoader(stack, stack_ori, k_size=self.rcf_scale)
+            all_datasets.append(ds)
+            particle_sizes.append(len(ds))  # 一般是 26
 
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
+        combined_dataset = ConcatDataset(all_datasets)
 
-                wavelet_processed[top:bottom, left:right] = particle
+        # ----------- 2. 自定义 collate_fn，实现零填充 + 原尺寸记录 --------
+        # ============================================
+        # 适用 img:(3,H,W) ；img_ori:(H,W) 的 pad_collate
+        # ============================================
+        def pad_collate(batch):
+            """
+            返回：
+                imgs_padded     (N, 3, H_max, W_max)
+                img_oris_padded (N, 1, H_max, W_max)
+                orig_sizes      [(H_img, W_img, H_ori, W_ori), ...]
+            """
+            imgs, img_oris, orig_sizes = [], [], []
 
-        return wavelet_processed
+            for img, img_ori in batch:
+                # ---------------- img (3CH) ----------------
+                _, h_i, w_i = img.shape
+                pad_h_i, pad_w_i = H_max - h_i, W_max - w_i
+                img_padded = F.pad(img, (0, pad_w_i, 0, pad_h_i), value=0)
 
-    def AutoFocusing_AI_Wavelet_GPU(self):
-        wavelet_processed = self.AutoFocusing_WaveLet_GPU()
-        # wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
-        particles, positions = self.AutoFocusing_Machine_Learning_GPU(get_position=True)    # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+                # ---------------- img_ori (1CH) -------------
+                if img_ori.ndim == 2:  # 先扩一维到 1×H×W
+                    img_ori = img_ori.unsqueeze(0)
+                _, h_o, w_o = img_ori.shape
+                pad_h_o, pad_w_o = H_max - h_o, W_max - w_o
+                img_ori_padded = F.pad(img_ori, (0, pad_w_o, 0, pad_h_o), value=0)
+                img_ori_padded = img_ori_padded.squeeze()
 
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
+                # ---------------- collect -------------------
+                imgs.append(img_padded)
+                img_oris.append(img_ori_padded)
+                orig_sizes.append((h_i, w_i, h_o, w_o))
 
-                wavelet_processed[top:bottom, left:right] = particle
+            return torch.stack(imgs), torch.stack(img_oris), orig_sizes
 
-        return wavelet_processed
+        combined_loader = DataLoader(
+            combined_dataset,
+            batch_size=256,
+            num_workers=0,
+            pin_memory=True,
+            collate_fn=pad_collate
+        )
 
-    def AutoFocusing_AI_Gradient_GPU(self):
-        # wavelet_processed = self.AutoFocusing_WaveLet_GPU()
-        wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
-        particles, positions = self.AutoFocusing_Machine_Learning_GPU(get_position=True)    # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+        # ------------------------ 3. 模型推理 --------------------------
+        self.rcfModel.eval()
+        focused_tensors = rcf_predict_V2(  # ← 你已有的推理函数
+            self.rcfModel,
+            combined_loader,
+            particle_sizes,  # 用于 rcf_predict_V2 拆分
+            device=self.device
+        )  # 返回 torch.Tensor 列表，每张大小 (1, H_max, W_max)
 
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
+        # -------------------- 4. 剪裁回原始尺寸 ------------------------
+        focused_particles = []
+        idx = 0
+        for size in particle_sizes:  # 按颗粒拆分
+            best_img = focused_tensors[idx]  # 每颗粒只保留 1 张最聚焦
+            idx += 1
+            H_pad, W_pad = best_img.shape
+            # 裁掉填充。因为每颗粒内部 img 尺寸相同，用第一张记录的尺寸即可
+            h0, w0 = stacks[0][0].shape  # 原尺寸（同颗粒同尺寸）
+            if isinstance(best_img, torch.Tensor):  # 兼容老版本返回 tensor 的情况
+                best_img = best_img.squeeze().cpu().numpy()
+                # 若已是 numpy，则什么都不用做
 
-                wavelet_processed[top:bottom, left:right] = particle
+            focused_particles.append(best_img)
 
-        return wavelet_processed
+        # ------------------- 5. 结果组织 & 返回 ------------------------
+        if get_position:
+            return focused_particles, positions
+        else:
+            self.focusing = create_square_mosaic(focused_particles)
+            for i, img in enumerate(focused_particles):
+                self.focusing_each[str(i)] = img
 
-def batch_Focusing(root=r'F:\lichenghao\data\2025.0429,9.2xSSC,PSDtry\2-nachangshi\chuli\5\chuli',
-                   method='AI_GPU'):
+def batch_Focusing(root=r'F:\lichenghao\data', method='AI_GPU'):
     # 指定使用的GPU
     import os
     gpu_id = 5
@@ -699,7 +927,6 @@ def batch_Focusing(root=r'F:\lichenghao\data\2025.0429,9.2xSSC,PSDtry\2-nachangs
 
         # end0 = time.time()
         # print("GPU耗时：{:.2f}".format(end0 - start0))
-
 
 def batch_Focusing_with_bar(config):
     # F:\lichenghao\data\2025.0429,9.2xSSC,PSDtry\2-nachangshi\chuli\5\chuli
@@ -789,9 +1016,8 @@ def batch_Focusing_with_bar(config):
     progress_bar.close()
     print("\nAll directories processed successfully!")
 
-
 if __name__ == '__main__':
-    # print('Utils Focusing Module', end='\n\n')
+    print('Utils Focusing Module', end='\n\n')
 
     '''
         预定义一个全息，并加载模拟数据，用于测试，包括
@@ -801,27 +1027,5 @@ if __name__ == '__main__':
         - 聚焦完成的图
         - 波前和相位
     '''
-    # hologram = MockData(data_path=r'F:\lichenghao\data\2025.0429,9.2xSSC,PSDtry\2-nachangshi\chuli\5again\test\Basler_acA2440-75umPOL__24968847__20250429_195631606_1.bmp')
-    # reconstruction_stack = hologram.holo.reconstruction  # 形状为(4096, 4508, num)
-
-    # hologram = Hologram(config=HoloConfig())
-    # Focus = Focusing(hologram, config=HoloConfig())
-
-    # start0 = time.time()
-    # cpu_result = Focus.run(method='AI_CPU')
-    # cv2.imwrite(os.path.join(r'F:\dongjiayao\Data\HoloLab_testData\autofocus\output', "CPU.png"), cpu_result)
-    # end0 = time.time()
-    # print("CPU耗时：{:.2f}".format(end0 - start0))
-
-    # start0 = time.time()
-    # gpu_result = Focus.run()     # TODO 选择自聚焦方法：Wavelet_CPU、Gradient_CPU、AI_CPU、 Wavelet_GPU、Gradient_GPU、AI_GPU
-    # cv2.imwrite(os.path.join(r'F:\dongjiayao\Data\HoloLab_testData\autofocus\output', "GPU.png"), gpu_result)
-    # end0 = time.time()
-    # print("GPU耗时：{:.2f}".format(end0 - start0))
-
-    # 以下为批量处理代码，暂时不集成到UI中
-    # batch_Focusing(r'F:\dongjiayao\Data\HoloLab_testData\autofocus\tmp')
-    # batch_Focusing()
-
-    # 带进度条
-    # batch_Focusing_with_bar(config=HoloConfig())
+    hologram = MockData()
+    print(f'- Hologram Data loaded successfully: {hologram.data_path}')

@@ -3,7 +3,7 @@ from hologram import Hologram
 from utils.open_image import OpenImage
 from utils.preprocessing import PreProcessing
 from utils.spectrum import Spectrum
-from utils.reconstruction import Reconstruction
+from utils.reconstruction import Reconstruction, Reconstruction_DongJY
 from utils.focusing import Focusing
 from utils.segmentation import Segmentation
 from utils.identification import Identification
@@ -12,11 +12,6 @@ from utils.data_summary import DataSummary
 
 from utils.polarization import Polarization
 from utils.mock_data import MockData
-
-try:
-    import torch
-except Exception as e:
-    print(f"[Module] {e}")
 
 '''MainWindow'''
 from PyQt6.QtWidgets import (
@@ -86,29 +81,33 @@ class Holo_Processor(QObject):
     def run(self, action_key: str):
 
         if   action_key == "open_image":
+            work_open_image = OpenImage(hologram=self.hologram, config=self.config, mode = 'Single Image')
+            work_open_image.run()
+            self._show_hologram()
 
-            work_open_image = OpenImage(hologram=self.hologram ,config=self.config)
-            hologram_raw, hologram, _image_loaded, image_height, image_width, holo_type, status_msg = work_open_image.run()
+            # work_open_image = OpenImage(hologram=self.hologram ,config=self.config)
+            # hologram_raw, hologram, _image_loaded, image_height, image_width, holo_type, status_msg = work_open_image.run()
+            # work_open_image.run()
 
-            if hologram_raw is None:
-                img_key  = "Origin"
-                img_dict = {img_key: self.hologram.hologram_raw}
-                self.image_ready.emit(img_key, img_dict, status_msg)
-
-            else:
-                self.hologram.hologram_raw  = hologram_raw
-                self.hologram.hologram      = hologram
-                self.hologram._image_loaded = _image_loaded
-
-                self.config.file_info['holo_type']    = holo_type
-                self.config.image_info['pixel_num_x'] = image_height
-                self.config.image_info['pixel_num_y'] = image_width
-
-                img_key = "Origin"
-                img_dict = {img_key: self.hologram.hologram_raw}
-
-                self.images["Origin"] = img_dict
-                self.image_ready.emit(img_key, img_dict, status_msg)
+            # if hologram_raw is None:
+            #     img_key  = "Origin"
+            #     img_dict = {img_key: self.hologram.hologram_raw}
+            #     self.image_ready.emit(img_key, img_dict, status_msg)
+            #
+            # else:
+            #     self.hologram.hologram_raw  = hologram_raw
+            #     self.hologram.hologram      = hologram
+            #     self.hologram._image_loaded = _image_loaded
+            #
+            #     self.config.file_info['holo_type']    = holo_type
+            #     self.config.image_info['pixel_num_x'] = image_height
+            #     self.config.image_info['pixel_num_y'] = image_width
+            #
+            #     img_key = "Origin"
+            #     img_dict = {img_key: self.hologram.hologram_raw}
+            #
+            #     self.images["Origin"] = img_dict
+            #     self.image_ready.emit(img_key, img_dict, status_msg)
 
         elif action_key == "preprocessing":
             self.image_ready.emit("PreProcessing", None, f"PreProcessing method: {self.config.pre_process['method']}")
@@ -126,125 +125,69 @@ class Holo_Processor(QObject):
             self.image_ready.emit(img_key, img_dict, f"{img_key} Finished. {status_msg}")
 
         elif action_key == "polarization":
-
-            worker_polarization = Polarization(hologram=self.hologram ,config=self.config)
+            self.image_ready.emit("Polarization", None, f"Split, Calculation")
+            worker_polarization = Polarization(hologram=self.hologram, config=self.config)
             worker_polarization.run()
-
-            img_key = "Polarization"
-            img_dict = {'Angle 0'   : self.hologram.hologram_p000//2,
-                        'Angle 45'  : self.hologram.hologram_p045//4,
-                        'Angle 90'  : self.hologram.hologram_p090//5,
-                        'Angle 135' : self.hologram.hologram_p135//8}
-
-            self.images[img_key] = img_dict
-            self.image_ready.emit(img_key, img_dict, f"Polarization Separated from Origin Image")
+            self._show_polarization()
+            self._show_hologram()
 
         elif action_key == "spectrum":
             self.image_ready.emit("Spectrum", None, f"Spectrum method: {self.config.spectrum['method']}")
 
-            worker_spectrum = Spectrum(hologram=self.hologram ,config=self.config)
-            self.hologram.hologram_spectrum, self.hologram.hologram_spectrum_raw, _ = worker_spectrum.run()
-
-            img_key  = "Spectrum"
-            img_dict = {
-                'Initial (Log10)'  : np.log10(0.0000001 + np.abs(self.hologram.hologram_spectrum_raw)),
-                'Processed(Log10)' : np.log10(0.0000001 + np.abs(self.hologram.hologram_spectrum))
-            }
-
-            self.images[img_key] = img_dict
-            self.image_ready.emit(img_key, img_dict, f"{img_key} Finished.")
+            worker_spectrum = Spectrum(hologram=self.hologram, config=self.config)
+            worker_spectrum.run()
+            self._show_spectrum()
 
         elif action_key == "reconstruction":
             self.image_ready.emit("Reconstruction", {}, f"Reconstruction method: {self.config.reconstruction['method']}, On Going, Please wait ... ...")
 
             worker_reconstruction = Reconstruction(hologram=self.hologram ,config=self.config)
-            self.hologram.reconstruction = worker_reconstruction.run()
-
-            # reconstruction = self.hologram.reconstruction
-            # for value in reconstruction.values():
-            #     value[:] = np.abs(value)
-
-            # reconstruction = self.hologram.reconstruction
-            # reconstruction_abs = {k: np.abs(v.copy()) ** 2 for k, v in reconstruction.items()}
-
-            reconstruction= self.hologram.reconstruction
-            for _key, _value in reconstruction.items():
-                abs_v   = np.abs(_value.copy())
-                min_val = np.min(abs_v)
-                max_val = np.max(abs_v)
-                reconstruction[_key] = (abs_v - min_val) / (max_val - min_val)
-
-            self.images["Reconstruction"] = reconstruction
-            self.image_ready.emit("Reconstruction", reconstruction, "Reconstruction Finished.")  # 显示等待动画等
+            worker_reconstruction.run()
+            self._show_reconstruction()
 
         elif action_key == "focusing":
             self.image_ready.emit("Focusing", {}, f"Focusing method: {self.config.focusing['method']}, On Going, Please wait ... ...")
 
+            # worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
             worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
-            self.hologram.focusing = worker_focusing.run()
-
-            img_key  = "Focusing"
-            img      = self.hologram.focusing
-            img_dict = {img_key: img}
-
-            self.images["Focusing"] = img_dict
-            self.image_ready.emit(img_key, img_dict, f"{img_key} Finished.")  # 显示等待动画等
+            worker_focusing.run()
+            self._show_focusing()
 
         elif action_key == "segmentation":
             self.image_ready.emit("Segmentation", {}, f"Segmentation method: {self.config.segmentation['method']}, On Going, Please wait ... ...")
 
             worker_segmentation = Segmentation(hologram=self.hologram ,config=self.config)
             worker_segmentation.run()
-
-            img_key  = "Segmentation"
-            img      = np.abs(self.hologram.segmentation)
-            img_dict = {img_key: img}
-
-            self.images["Segmentation"] = img_dict
-            self.image_ready.emit(img_key, img_dict, f"{img_key} Finished.")
+            self._show_segmentation()
 
         elif action_key == "identification":
             self.image_ready.emit("Identification", {}, f"Identification method: {self.config.identification['method']}, On Going, Please wait ... ...")
 
             worker_identification = Identification(hologram=self.hologram ,config=self.config)
             worker_identification.run()
-
-            img_key  = "Identification"
-            img      = np.abs(self.hologram.identification)
-            img_dict = {img_key: img}
-
-            self.images[img_key] = img_dict
-            self.image_ready.emit(img_key, img_dict, f"{img_key} Finished.")
+            self._show_identification()
 
         elif action_key == "phase":
             self.image_ready.emit("Phase", {}, f"Phase analysis method: {self.config.phase['method']}, On Going, Please wait ... ...")
 
             worker_phase = Phase(hologram=self.hologram ,config=self.config)
             worker_phase.run()
-
-            img_key = "Phase"
-            img_dict = {'Origin'        : self.hologram.phase,
-                        'Unwrapped'     : self.hologram.phase_unwrapped,
-                        'Compensated'   : self.hologram.phase_compensated,
-                        'Compensation'  : self.hologram.phase_compensation_mat,
-                        'Corrected'     : self.hologram.phase_corrected}
-
-            self.images[img_key] = img_dict
-            self.image_ready.emit(img_key, img_dict, "Phase Analysis Finished.")
+            self._show_phase()
 
         elif action_key == "data_summary":
             worker_data_summary = DataSummary(hologram=self.hologram ,config=self.config)
-            data_dict = worker_data_summary.run()
+            worker_data_summary.run()
+            self._show_data_summary()
 
             '''频谱调试'''
             # fig = Figure(figsize=(6, 4))  # 可设置图像大小
             # ax1 = fig.add_subplot(121)  # 添加子图
-            # log_spectrum_raw = np.log(1e-5 + np.abs(self.hologram.hologram_spectrum_raw))
+            # log_spectrum_raw = np.log(1e-5 + np.abs(self.hologram.spectrum_raw))
             # im1 = ax1.imshow(log_spectrum_raw, cmap='viridis', aspect='auto')
             # ax1.set_title("2D Image Display")  # 设置标题
             #
             # ax2 = fig.add_subplot(122)  # 添加子图
-            # log_spectrum = np.log(1e-5 + np.abs(self.hologram.hologram_spectrum))
+            # log_spectrum = np.log(1e-5 + np.abs(self.hologram.spectrum))
             # im2 = ax2.imshow(log_spectrum, cmap='viridis', aspect='auto')
             # ax2.set_title("2D Image Display")  # 设置标题
             #
@@ -268,8 +211,6 @@ class Holo_Processor(QObject):
             # data_dict = {
             #     'Spec' : fig
             # }
-
-            self.image_ready.emit('Analysis', data_dict, "Data Analysis Finished.")
 
         elif action_key == "debug":
             ''''''
@@ -320,8 +261,8 @@ class Holo_Processor(QObject):
             '''Spectrum'''
             if 1:
                 img_key = "Spectrum"
-                img_dict = {'Spectrum'      : self.hologram.hologram_spectrum_raw,
-                            'Spectrum Side' : self.hologram.hologram_spectrum,}
+                img_dict = {'Spectrum'      : self.hologram.spectrum_raw,
+                            'Spectrum Side' : self.hologram.spectrum,}
 
                 self.images[img_key] = img_dict
                 self.image_ready.emit(img_key, img_dict, f"Refresh: {img_key}.")
@@ -393,13 +334,14 @@ class Holo_Processor(QObject):
             if self.config.multi_processing['run_open_image']:
                 images_path     = self.config.multi_processing['images_path']
 
-                work_open_image = OpenImage(hologram=self.hologram, config=self.config, mode='multi')
-                images_urls, msg, containts_non_image, non_image_files = work_open_image.run()
+                work_open_image = OpenImage(hologram=self.hologram, config=self.config, mode = 'Multi Images')
+                work_open_image.run()
 
-                self.config.multi_processing['images_urls'] = images_urls
+                images_urls     = self.config.multi_processing['images_urls']
+                non_images_urls = self.config.multi_processing['non_images_urls']
 
-                if containts_non_image:
-                    self.image_ready.emit("Multi Processing", np.array([len(images_urls)]), f"Found Non-image files: {non_image_files}")
+                if not images_urls:
+                    self.image_ready.emit("Multi Processing", np.array([len(images_urls)]), f"No images found in {images_path}.")
                     return
                 else:
                     self.image_ready.emit("Multi Processing", np.array([len(images_urls)]), f"{len(images_urls)} images found in {images_path}")
@@ -410,7 +352,13 @@ class Holo_Processor(QObject):
             images_num     = len(images_urls)
             for i, image in enumerate(images_urls):
 
-                self.image_ready.emit("Multi Processing", {}, f"  {i+1} / {images_num}, {image}")
+                self.config.file_info['image_path'] = os.path.dirname(image)
+                self.config.file_info['image_name'] = os.path.basename(image)
+
+                if self.config.multi_processing['run_open_image']:
+                    work_open_image = OpenImage(hologram=self.hologram, config=self.config, mode='Single Image')
+                    work_open_image.run()
+                    self.image_ready.emit("Multi Processing", {}, f"  {i+1} / {images_num}, {image}")
 
                 if self.config.multi_processing['run_preprocessing']:
                     worker_preprocessing = PreProcessing(hologram=self.hologram, config=self.config)
@@ -419,33 +367,32 @@ class Holo_Processor(QObject):
 
                 if self.config.multi_processing['run_polarization']:
                     worker_polarization = Polarization(hologram=self.hologram, config=self.config)
-                    self.hologram.hologram_p000, self.hologram.hologram_p000, \
-                    self.hologram.hologram_p000, self.hologram.hologram_p000 = worker_polarization.run()
+                    worker_polarization.run()
                     self.image_ready.emit("Multi Processing", {}, 'Polar > ')
 
                 if self.config.multi_processing['run_spectrum']:
                     worker_spectrum = Spectrum(hologram=self.hologram, config=self.config)
-                    self.hologram.hologram_spectrum, self.hologram.hologram_spectrum_raw = worker_spectrum.run()
+                    worker_spectrum.run()
                     self.image_ready.emit("Multi Processing", {}, 'Spectrum > ')
 
                 if self.config.multi_processing['run_reconstruction']:
                     woker_reconstruction = Reconstruction(hologram=self.hologram, config=self.config)
-                    self.hologram.reconstruction = woker_reconstruction.run()
+                    woker_reconstruction.run()
                     self.image_ready.emit("Multi Processing", {}, 'Reconstruct > ')
 
                 if self.config.multi_processing['run_focusing']:
                     worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
-                    self.hologram.focusing = worker_focusing.run()
+                    worker_focusing.run()
                     self.image_ready.emit("Multi Processing", {}, 'Focusing > ')
 
                 if self.config.multi_processing['run_segmentation']:
                     worker_segmentation = Segmentation(hologram=self.hologram ,config=self.config)
-                    self.hologram.segmentation = worker_segmentation.run()
+                    worker_segmentation.run()
                     self.image_ready.emit("Multi Processing", {}, 'Segment > ')
 
                 if self.config.multi_processing['run_identification']:
                     worker_identification = Identification(hologram=self.hologram ,config=self.config)
-                    self.hologram.identification = worker_identification.run()
+                    worker_identification.run()
                     self.image_ready.emit("Multi Processing", {}, 'Identify > ')
 
                 if self.config.multi_processing['run_phase']:
@@ -458,7 +405,7 @@ class Holo_Processor(QObject):
                     worker_data_summary.run()
                     self.image_ready.emit("Multi Processing", {}, 'Analysis > ')
 
-                self.image_ready.emit("Multi Processing", [i+1, images_num], 'Done.')   # 用list作为单幅图像处理完成的信号
+                self.image_ready.emit("Multi Processing", [i + 1, images_num], 'Done.')   # 用list作为单幅图像处理完成的信号
                 np.array([i + 1, images_num])
                 if self._check_abort():
                     self.image_ready.emit("Multi Processing", np.array([images_num]), f"Multi Processing Aborted.")
@@ -467,7 +414,7 @@ class Holo_Processor(QObject):
                 if i+1 == max_handle_num:
                     break
 
-            self.image_ready.emit("Multi Processing", np.array([i+1, images_num]), f"Finished. Total {i+1} / {images_num}.")
+            self.image_ready.emit("Multi Processing", np.array([i + 1, images_num]), f"Finished. Total {i+1} / {images_num}.")
         # 保存/读取配置文件、数据操作
         elif action_key == "save_config":
             config_path = self.hologram.config.save_and_load['config_save_path']
@@ -495,8 +442,104 @@ class Holo_Processor(QObject):
             msg = self.hologram.load_data()
             self.save_load_operation.emit("Load Data", msg)
 
-        # else:
-        #     self.image_ready.emit(img_key, None, "Unknown action: {action_key}.")
+        else:
+            self.image_ready.emit(img_key, None, "Unknown action: {action_key}.")
+
+    def _show_hologram(self):
+        img_key = "Origin"
+        img_dict = {
+            'Raw Image': self.hologram.hologram_raw,
+            'Processing': self.hologram.hologram}
+
+        self.images["Origin"] = img_dict
+        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)
+    def _show_polarization(self):
+        img_key = "Polarization"
+        img_dict = {'Angle 0': self.hologram.hologram_p000,
+                    'Angle 45': self.hologram.hologram_p045,
+                    'Angle 90': self.hologram.hologram_p090,
+                    'Angle 135': self.hologram.hologram_p135,
+                    'S0': self.hologram.polar_S0,
+                    'S1': self.hologram.polar_S1,
+                    'S2': self.hologram.polar_S2,
+                    'Amplitude': self.hologram.polar_amp}
+
+        self.images[img_key] = img_dict
+        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)
+    def _show_spectrum(self):
+        img_key = "Spectrum"
+        img_dict = {
+            'Initial (Log10)': np.log10(0.0000001 + np.abs(self.hologram.spectrum_raw)),
+            'Process (Log10)': np.log10(0.0000001 + np.abs(self.hologram.spectrum))
+        }
+
+        self.images[img_key] = img_dict
+        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)
+    def _show_reconstruction(self):
+        '归一化'
+        reconstruction = self.hologram.reconstruction
+        for _key, _value in reconstruction.items():
+            abs_v = np.abs(_value.copy())
+            min_val = np.min(abs_v)
+            max_val = np.max(abs_v)
+            reconstruction[_key] = (abs_v - min_val) / (max_val - min_val)
+
+        self.images["Reconstruction"] = reconstruction
+        self.image_ready.emit("Reconstruction", reconstruction, self.hologram.status_msg)  # 显示等待动画等
+    def _show_focusing(self):
+        if self.hologram.focusing_each == {}:
+            img_key = "Focusing"
+            img = self.hologram.focusing
+            img_dict = {img_key: img}
+        else:
+            '''展示总体、个体'''
+            img_dict = self.hologram.focusing_each
+
+            img_key = "Focusing"
+            img = np.abs(self.hologram.focusing)
+
+            img_dict.pop(img_key, None)  # 如果 key 已存在，先删除它（避免重复）
+            img_dict = {img_key: img, **img_dict}  # 重建字典，确保新键在最前面
+
+        self.images["Focusing"] = img_dict
+        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)  # 显示等待动画等
+    def _show_segmentation(self):
+        if self.hologram.segmentation_each == {}:
+            img_key = "Segmentation"
+            img = self.hologram.segmentation
+            img_dict = {img_key: img}
+        else:
+            '''展示总体、个体'''
+            img_dict = self.hologram.segmentation_each
+
+            img_key = "Segmentation"
+            img = np.abs(self.hologram.segmentation)
+
+            img_dict.pop(img_key, None)  # 如果 key 已存在，先删除它（避免重复）
+            img_dict = {img_key: img, **img_dict}  # 重建字典，确保新键在最前面
+
+        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)
+    def _show_identification(self):
+        identification = self.hologram.identification_each
+
+        self.images["Identification"] = identification
+        self.image_ready.emit("Identification", identification, self.hologram.status_msg)
+    def _show_phase(self):
+        img_key = "Phase"
+        img_dict = {'Origin':       self.hologram.phase,
+                    'Unwrapped':    self.hologram.phase_unwrapped,
+                    'Compensated':  self.hologram.phase_compensated,
+                    'Compensation': self.hologram.phase_compensation_mat,
+                    'Corrected':    self.hologram.phase_corrected}
+
+        self.images[img_key] = img_dict
+        self.image_ready.emit(img_key, img_dict, "Phase Analysis Finished.")
+    def _show_data_summary(self):
+        data_dict = {}
+        data_dict['Diameter'] = self.hologram.figure_diameter
+        data_dict['Classification'] = self.hologram.figure_classification
+
+        self.image_ready.emit('Analysis', data_dict, "Data Analysis Finished.")
 
     def stop(self):
         """外部调用，用于请求中止当前处理"""
@@ -1036,7 +1079,8 @@ class Image_Viewer(QWidget):
             h, w = norm_img.shape
 
             # 这里假设输入是单通道灰度图 numpy.ndarray，格式如原来
-            qimage = QImage(norm_img.data, w, h, w, QImage.Format.Format_Grayscale8)
+            qimage = QImage(norm_img.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+            # qimage = QImage(norm_img.data, w, h, w, QImage.Format.Format_Grayscale8)
             self.image = qimage
             pixmap = QPixmap.fromImage(qimage)
             self.pixmap_item.setPixmap(pixmap)
@@ -1045,6 +1089,11 @@ class Image_Viewer(QWidget):
 
             self._zoom = 0
             self.index_label.setText(str(key))  # 显示字典key
+
+            font_metrics = self.index_label.fontMetrics()
+            text_width = font_metrics.horizontalAdvance(str(key)) + 10
+            self.index_label.setFixedWidth(max(50, text_width))  # 保持至少120像素宽度
+
             self._move_pixel_label_to_corner()  # 保证像素标签位置始终正确
 
     def _fit_in_view(self):
@@ -1166,7 +1215,6 @@ class Data_Viewer(QWidget):
             self.buttons[0].setChecked(True)
 
         self._show_figure_at_index(0)
-
     def _show_figure_at_index(self, index: int):
         if 0 <= index < len(self.keys):
             key = self.keys[index]
@@ -1184,7 +1232,6 @@ class Data_Viewer(QWidget):
             self.data_index = index
             for i, btn in enumerate(self.buttons):
                 btn.setChecked(i == index)
-
     def _copy_axes_content(self, src_ax, dst_ax):
         for line in src_ax.get_lines():
             dst_ax.plot(line.get_xdata(), line.get_ydata(),
@@ -1206,6 +1253,86 @@ class Data_Viewer(QWidget):
         dst_ax.set_ylabel(src_ax.get_ylabel())
         dst_ax.set_xlim(src_ax.get_xlim())
         dst_ax.set_ylim(src_ax.get_ylim())
+
+        dst_ax.grid(any(line.get_visible() for line in src_ax.get_xgridlines() + src_ax.get_ygridlines()))
+
+    def set_image_(self, data_dict: dict):
+        if not data_dict:
+            return
+
+        if not isinstance(data_dict, dict):
+            raise ValueError("set_image 参数必须是 dict")
+
+        self.data_dict = data_dict
+        self.keys = list(data_dict.keys())
+        self.data_index = 0
+        self._empty = False
+
+        # 清空旧按钮
+        for btn in self.buttons:
+            btn.deleteLater()
+        self.buttons.clear()
+
+        for i, key in enumerate(self.keys):
+            btn = QPushButton(str(key), self.button_widget)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, idx=i: self._show_figure_at_index(idx))
+            btn.setMinimumHeight(35)
+            btn.setMaximumWidth(250)
+            self.button_layout.addWidget(btn)
+            self.buttons.append(btn)
+
+        if self.buttons:
+            self.buttons[0].setChecked(True)
+
+        self._show_figure_at_index(0)
+    def _show_figure_at_index_(self, index: int):
+        if 0 <= index < len(self.keys):
+            key = self.keys[index]
+            fig = self.data_dict[key]
+            if not isinstance(fig, Figure):
+                raise ValueError(f"key={key} 对应数据不是 Figure 实例")
+
+            self.figure.clear()
+
+            # 复制 axes 内容到当前唯一 figure
+            for src_ax in fig.axes:
+                dst_ax = self.figure.add_subplot(src_ax.get_subplotspec())
+                self._copy_axes_content_safe(src_ax, dst_ax)
+
+            self.canvas.draw()
+
+            self.data_index = index
+            for i, btn in enumerate(self.buttons):
+                btn.setChecked(i == index)
+    def _copy_axes_content_safe(self, src_ax, dst_ax):
+        # 拷贝线条
+        for line in src_ax.get_lines():
+            dst_ax.plot(line.get_xdata(), line.get_ydata(),
+                        color=line.get_color(),
+                        linestyle=line.get_linestyle(),
+                        marker=line.get_marker(),
+                        linewidth=line.get_linewidth())
+
+        # 拷贝图像（如imshow）
+        for image in src_ax.get_images():
+            dst_ax.imshow(image.get_array(),
+                          cmap=image.get_cmap(),
+                          extent=image.get_extent(),
+                          origin=image.origin,
+                          interpolation=image.get_interpolation())
+
+        # 不拷贝 bar patch（patch 不能跨 figure），可选用原始数据重绘方式
+
+        # 拷贝标题、坐标轴信息
+        dst_ax.set_title(src_ax.get_title())
+        dst_ax.set_xlabel(src_ax.get_xlabel())
+        dst_ax.set_ylabel(src_ax.get_ylabel())
+        dst_ax.set_xlim(src_ax.get_xlim())
+        dst_ax.set_ylim(src_ax.get_ylim())
+        dst_ax.set_xticks(src_ax.get_xticks())
+        dst_ax.set_xticklabels([label.get_text() for label in src_ax.get_xticklabels()],
+                               rotation=45, ha="right")  # 可调整
 
         dst_ax.grid(any(line.get_visible() for line in src_ax.get_xgridlines() + src_ax.get_ygridlines()))
 
@@ -1321,6 +1448,7 @@ class MainWindow(QMainWindow):
         param_layout.addWidget(self.create_segmentation_group())
         param_layout.addWidget(self.create_identification_group())
         param_layout.addWidget(self.create_phase_group())
+        param_layout.addWidget(self.create_polarization_group())
         param_layout.addWidget(self.create_data_summary_group())
         param_layout.addWidget(self.create_save_and_load_group())
         param_layout.addStretch()
@@ -1416,11 +1544,11 @@ class MainWindow(QMainWindow):
             self.tab_widget.addTab(camera_label, name)
 
         # 调试页面
-        tab_debug       = ["DeBug"]
-        for name in tab_debug:
-            viewer = Data_Viewer()
-            self.image_tabs[name] = viewer
-            self.tab_widget.addTab(viewer, name)
+        # tab_debug       = ["DeBug"]
+        # for name in tab_debug:
+        #     viewer = Data_Viewer()
+        #     self.image_tabs[name] = viewer
+        #     self.tab_widget.addTab(viewer, name)
 
         self.tab_widget.tabBar().setStyleSheet("""
             QTabBar::tab {
@@ -1462,7 +1590,7 @@ class MainWindow(QMainWindow):
 
         return middle_widget
 
-    # 不要了，单独一个 Widget，用于single mode
+    # 这个不要了，单独一个 Widget，用于single mode
     def _init_right_panel__(self):
         panel = QWidget()
         # panel.setFixedWidth(150)
@@ -2027,7 +2155,14 @@ class MainWindow(QMainWindow):
                 "type": "input",
                 "value": conf.get("image_name", ""),
                 "name": "Image Name"
-            }
+            },
+            # "line1": {"type": "line"},
+            # "file_info.read_mode": {
+            #     "type": "combo",
+            #     "value": conf.get("read_mode", "None"),
+            #     "options": conf.get("read_mode_list", []),
+            #     "name": "Read Mode"
+            # },
         })
     def create_image_info_group(self):
         # conf = self.config.get("image_info", {})
@@ -2128,6 +2263,29 @@ class MainWindow(QMainWindow):
             }
         })
 
+    def create_focusing_group_(self):
+        # conf = self.config.get("focusing", {})
+        conf = self.config.focusing if hasattr(self.config, 'focusing') else {}
+        return self._create_group("Focusing", {
+            "focusing.method": {
+                "type": "combo",
+                "value": conf.get("method", "None"),
+                "options": conf.get("method_list", []),
+                "name": "Method"
+            },
+            "focusing.cpu_num": {"type": "input", "value": str(conf.get("cpu_num", "1")), "name": "CPU Num"},
+            "focusing.gpu_num": {"type": "input", "value": str(conf.get("gpu_num", "1")), "name": "GPU Num"},
+            "focusing.model_path": {
+                "type": "input",
+                "value": conf.get("model_path", ""),
+                "name": "Model Path"
+            },
+            "focusing.model_name": {
+                "type": "input",
+                "value": conf.get("model_name", ""),
+                "name": "Model Name"
+            }
+        })
     def create_focusing_group(self):
         # conf = self.config.get("focusing", {})
         conf = self.config.focusing if hasattr(self.config, 'focusing') else {}
@@ -2180,8 +2338,10 @@ class MainWindow(QMainWindow):
                 "value": conf.get("get_model", False),
                 "name": "Get Model by Function (For Bacth)"
             },
+
         })
-    def create_segmentation_group(self):
+
+    def create_segmentation_group_(self):
         # conf = self.config.get("segmentation", {})
         conf = self.config.segmentation if hasattr(self.config,'segmentation') else {}
         return self._create_group("Segmentation", {
@@ -2196,7 +2356,57 @@ class MainWindow(QMainWindow):
             "segmentation.model_path": {"type": "input", "value": conf.get("model_path", ""), "name": "Model Path"},
             "segmentation.model_name": {"type": "input", "value": conf.get("model_name", ""), "name": "Model Name"},
         })
-    def create_identification_group(self):
+    def create_segmentation_group(self):
+        # conf = self.config.get("segmentation", {})
+        conf = self.config.segmentation if hasattr(self.config,'segmentation') else {}
+        return self._create_group("Segmentation", {
+            "segmentation.method": {
+                "type": "combo",
+                "value": conf.get("method", "None"),
+                "options": conf.get("method_list", []),
+                "name": "Method"
+            },
+            "segmentation.type": {
+                "type": "combo",
+                "value": conf.get("type", "None"),
+                "options": conf.get("type_list", []),
+                "name": "Image Type"
+            },
+            "line1": {"type": "line"},
+            "segmentation.device": {
+                "type": "combo",
+                "value": conf.get("device", "cpu"),
+                "options": conf.get("device_list", []),
+                "name": "Device"
+            },
+            "segmentation.cpu_num": {
+                "type": "input",
+                "value": str(conf.get("cpu_num", "1")),
+                "name": "CPU Num"},
+            "segmentation.gpu_num": {
+                "type": "input",
+                "value": str(conf.get("gpu_num", "0")),
+                "name": "GPU Num"
+            },
+
+            "line2": {"type": "line"},
+            "segmentation.gray_thresh": {
+                "type": "input",
+                "value": str(conf.get("gray_thresh", "127")),
+                "name": "Gray Threshold"
+            },
+            "segmentation.block_size": {
+                "type": "input",
+                "value": str(conf.get("block_size", "32")),
+                "name": "Block Size"
+            },
+
+            "line3": {"type": "line"},
+            "segmentation.model_path": {"type": "input", "value": conf.get("model_path", ""), "name": "Model Path"},
+            "segmentation.model_name": {"type": "input", "value": conf.get("model_name", ""), "name": "Model Name"},
+        })
+
+    def create_identification_group_(self):
         # conf = self.config.get("identification", {})
         conf = self.config.identification if hasattr(self.config, 'identification') else {}
         return self._create_group("Identification", {
@@ -2209,6 +2419,35 @@ class MainWindow(QMainWindow):
             "identification.model_path": {"type": "input", "value": conf.get("model_path", ""), "name": "Model Path"},
             "identification.model_name": {"type": "input", "value": conf.get("model_name", ""), "name": "Model Name"},
         })
+    def create_identification_group(self):
+        # conf = self.config.get("identification", {})
+        conf = self.config.identification if hasattr(self.config, 'identification') else {}
+        return self._create_group("Identification", {
+            "identification.method": {
+                "type": "combo",
+                "value": conf.get("method", "None"),
+                "options": conf.get("method_list", []),
+                "name": "Method"
+            },
+
+            "identification.type": {
+                "type": "combo",
+                "value": conf.get("type", "None"),
+                "options": conf.get("type_dict", []),
+                "name": "Particle Type"
+            },
+
+            "identification.model_path": {
+                "type": "input",
+                "value": conf.get("model_path", ""),
+                "name": "Model Path"
+            },
+            "identification.model_name": {
+                "type": "input",
+                "value": conf.get("model_name", ""),
+                "name": "Model Name"},
+        })
+
     def create_phase_group(self):
         # conf = self.config.get("phase", {})
         conf = self.config.phase if hasattr(self.config, 'phase') else {}
@@ -2222,6 +2461,38 @@ class MainWindow(QMainWindow):
             "phase.model_path": {"type": "input", "value": conf.get("model_path", ""), "name": "Model Path"},
             "phase.model_name": {"type": "input", "value": conf.get("model_name", ""), "name": "Model Name"}
         })
+    def create_polarization_group(self):
+        conf = self.config.polarization if hasattr(self.config, 'polarization') else {}
+        return self._create_group("Polarization", {
+            "polarization.split_image": {
+                "type": "checkbox",
+                "value": conf.get("split_image", True),
+                "name": "Split Polarization Image"
+            },
+
+            "polarization.split_mode": {
+                "type": "combo",
+                "value": conf.get("split_mode", "None"),
+                "options": conf.get("split_mode_list", []),
+                "name": "Split Mode"
+            },
+
+            "line1": {"type": "line"},
+
+            "polarization.polar_coeff": {
+                "type": "checkbox",
+                "value": conf.get("polar_coeff", True),
+                "name": "Calculate Polarization Parameters"
+            },
+
+            "polarization.device": {
+                "type": "combo",
+                "value": conf.get("device", "cpu"),
+                "options": conf.get("device_list", []),
+                "name": "Device"
+            }
+        })
+
     def create_data_summary_group(self):
         # conf = self.config.get("data_summary", {})
         conf = self.config.data_summary if hasattr(self.config, 'data_summary') else {}
@@ -2851,7 +3122,7 @@ class MainWindow(QMainWindow):
     '''
     def update_image(self, operation_name: str, image: np.ndarray | dict, status: str):
         ''''''
-        '''Case 1. 多张张图像'''
+        '''Case 1. 多张图像'''
         if operation_name == "Multi Processing":
             self._button_locked()
             self._handle_multi_processing(operation_name, image, status)
@@ -2879,6 +3150,9 @@ class MainWindow(QMainWindow):
 
         if operation_name == "Origin":
             self._handle_open_image()
+
+        if operation_name == "Spectrum":
+            self._handle_spectrum()
 
         # 标准化为字典形式
         image_dict = {operation_name: image_data} if isinstance(image_data, np.ndarray) else image_data
@@ -2933,6 +3207,17 @@ class MainWindow(QMainWindow):
         #
         # except Exception as e:
         #     return
+    def _handle_spectrum(self):
+
+        center_x    = str(self.config.spectrum['ROI_rectangle']['center_x'])
+        center_y    = str(self.config.spectrum['ROI_rectangle']['center_y'])
+        rect_width  = str(self.config.spectrum['ROI_rectangle']['rect_width'])
+        rect_height = str(self.config.spectrum['ROI_rectangle']['rect_height'])
+
+        self.input_fields["spectrum.ROI_rectangle.center_x"].setText(center_x)
+        self.input_fields["spectrum.ROI_rectangle.center_y"].setText(center_y)
+        self.input_fields["spectrum.ROI_rectangle.rect_width"].setText(rect_width)
+        self.input_fields["spectrum.ROI_rectangle.rect_height"].setText(rect_height)
 
     'GUI刷新 单图处理'
     def _update_progress_single_operation(self):

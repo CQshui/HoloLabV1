@@ -1321,6 +1321,9 @@ class IntegratedControlApp(QMainWindow):
         self.worker = ModbusWorker(self.command_queue, self.signals)
         self.init_ui()
         self.worker.start()
+        self.continuous_timer = None
+        self.is_continuous_running = False
+        self.current_scenario_index = 0
 
     def init_ui(self):
         self.setWindowTitle("泵阀集成控制系统")
@@ -1355,28 +1358,41 @@ class IntegratedControlApp(QMainWindow):
         motor_control = MotorControlWidget(self.command_queue, self.signals, self.worker)
         self.tab_widget.addTab(motor_control, "电机控制")
 
-        # 系统工况控制页
+        # 系统工况控制页 - 重新设计布局
         scenario_widget = QWidget()
         scenario_layout = QVBoxLayout()
         scenario_widget.setLayout(scenario_layout)
+
+        # 标题
+        scenario_title = QLabel("系统工况控制")
+        scenario_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        scenario_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scenario_title.setStyleSheet("color: #2E8B57; margin: 10px 0;")
+        scenario_layout.addWidget(scenario_title)
+
+        # 工况按钮网格
+        btn_grid = QGridLayout()
+        btn_grid.setHorizontalSpacing(15)
+        btn_grid.setVerticalSpacing(10)
 
         self.scenarios = {
             1: {"name": "测量模式", "description": "V1,V3开,V5开30s关闭,电机上升，相机拍摄，泵1反转5RPM,泵2正转600RPM"},
             2: {"name": "浆液路清洗", "description": "V2,V3，V5开,电机下降,泵1反转5RPM,泵2正转600RPM，1min后全部关闭"},
             3: {"name": "沉积流道冲洗", "description": "V4开,电机处于下降位，1min后关闭"},
-
             0: {"name": "全部关闭", "description": "所有阀门关闭,所有泵停止"}
         }
 
-        btn_grid = QGridLayout()
+        # 为每个工况创建按钮
         for i, (sid, info) in enumerate(self.scenarios.items()):
+            # 跳过全部关闭工况（不参与连续运行）
+            if sid == 0:
+                continue
+
             btn = QPushButton(f"工况 {sid}\n({info['name']})")
             btn.setToolTip(info["description"])
 
-            # 定义不同按钮的基础颜色
-            base_color = "#CD5C5C" if sid == 0 else "#5F9EA0"
-
-            # 设置详细的样式表
+            # 设置样式
+            base_color = "#5F9EA0"
             btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {base_color};
@@ -1385,6 +1401,8 @@ class IntegratedControlApp(QMainWindow):
                     border-radius: 5px;
                     padding: 5px;
                     font-weight: bold;
+                    min-width: 120px;
+                    min-height: 60px;
                 }}
                 QPushButton:hover {{
                     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -1405,9 +1423,137 @@ class IntegratedControlApp(QMainWindow):
             """)
 
             btn.clicked.connect(lambda _, s=sid: self.activate_full_scenario(s))
-            btn_grid.addWidget(btn, i // 2, i % 2)
+            btn_grid.addWidget(btn, 0, i)
+
+        # 添加全部关闭按钮
+        close_btn = QPushButton("工况 0\n(全部关闭)")
+        close_btn.setToolTip(self.scenarios[0]['description'])
+        base_color = "#CD5C5C"
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {base_color};
+                color: white;
+                border: 2px outset {base_color};
+                border-radius: 5px;
+                padding: 5px;
+                font-weight: bold;
+                min-width: 120px;
+                min-height: 60px;
+            }}
+            QPushButton:hover {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                  stop:0 #{self.lighten_color(base_color, 20)}, stop:1 {base_color});
+                border: 2px outset #{self.lighten_color(base_color, 10)};
+            }}
+            QPushButton:pressed {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                  stop:0 {base_color}, stop:1 #{self.darken_color(base_color, 10)});
+                border: 2px inset {base_color};
+            }}
+        """)
+        close_btn.clicked.connect(lambda: self.activate_full_scenario(0))
+        btn_grid.addWidget(close_btn, 0, 3)
 
         scenario_layout.addLayout(btn_grid)
+
+        # 添加分隔线
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        scenario_layout.addWidget(separator)
+
+        # 连续运行控制组
+        continuous_group = QGroupBox("连续循环运行 (1→2→3→1→...)")
+        continuous_layout = QVBoxLayout()
+        continuous_layout.setSpacing(10)
+
+        # 间隔时间设置
+        interval_layout = QGridLayout()
+
+        interval_layout.addWidget(QLabel("工况1后间隔(秒):"), 0, 0)
+        self.interval1_spin = QSpinBox()
+        self.interval1_spin.setRange(1, 600)
+        self.interval1_spin.setValue(10)
+        interval_layout.addWidget(self.interval1_spin, 0, 1)
+
+        interval_layout.addWidget(QLabel("工况2后间隔(秒):"), 1, 0)
+        self.interval2_spin = QSpinBox()
+        self.interval2_spin.setRange(1, 600)
+        self.interval2_spin.setValue(15)
+        interval_layout.addWidget(self.interval2_spin, 1, 1)
+
+        interval_layout.addWidget(QLabel("工况3后间隔(秒):"), 2, 0)
+        self.interval3_spin = QSpinBox()
+        self.interval3_spin.setRange(1, 600)
+        self.interval3_spin.setValue(20)
+        interval_layout.addWidget(self.interval3_spin, 2, 1)
+
+        continuous_layout.addLayout(interval_layout)
+
+        # 控制按钮
+        btn_layout = QHBoxLayout()
+
+        self.continuous_run_btn = QPushButton("开始连续运行")
+        self.continuous_run_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: 2px outset #4CAF50;
+                border-radius: 5px;
+                padding: 8px 15px;
+                font-weight: bold;
+                font-size: 12pt;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #666666;
+            }
+        """)
+        self.continuous_run_btn.clicked.connect(self.start_continuous_run)
+        btn_layout.addWidget(self.continuous_run_btn)
+
+        self.stop_continuous_btn = QPushButton("停止运行")
+        self.stop_continuous_btn.setEnabled(False)
+        self.stop_continuous_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border: 2px outset #f44336;
+                border-radius: 5px;
+                padding: 8px 15px;
+                font-weight: bold;
+                font-size: 12pt;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #666666;
+            }
+        """)
+        self.stop_continuous_btn.clicked.connect(self.stop_continuous_run)
+        btn_layout.addWidget(self.stop_continuous_btn)
+
+        continuous_layout.addLayout(btn_layout)
+
+        # 状态显示
+        self.continuous_status_layout = QHBoxLayout()
+        self.continuous_status_label = QLabel("连续运行状态: 未启动")
+        self.continuous_status_label.setStyleSheet("font-weight: bold; color: #2E8B57; font-size: 11pt;")
+        self.continuous_status_layout.addWidget(self.continuous_status_label)
+
+        self.current_scenario_label = QLabel("当前工况: -")
+        self.current_scenario_label.setStyleSheet("font-weight: bold; color: #FF6B35; font-size: 11pt;")
+        self.continuous_status_layout.addWidget(self.current_scenario_label)
+
+        continuous_layout.addLayout(self.continuous_status_layout)
+        continuous_group.setLayout(continuous_layout)
+        scenario_layout.addWidget(continuous_group)
+
         self.tab_widget.addTab(scenario_widget, "系统工况")
 
         # 系统日志
@@ -1667,6 +1813,98 @@ class IntegratedControlApp(QMainWindow):
                     f"<font color='blue'>[{timestamp}] 等待电机位置达到60000...</font>")
             else:
                 execute_jog(scenario['motor'])
+
+    def start_continuous_run(self):
+        """开始连续循环运行工况1→2→3→1→..."""
+        if self.is_continuous_running:
+            return
+
+        self.is_continuous_running = True
+        self.current_scenario_index = 1  # 从工况1开始
+        self.continuous_run_btn.setEnabled(False)
+        self.stop_continuous_btn.setEnabled(True)
+
+        # 更新状态显示
+        self.continuous_status_label.setText("连续运行状态: 运行中")
+        self.continuous_status_label.setStyleSheet("font-weight: bold; color: #FF6B35; font-size: 11pt;")
+        self.current_scenario_label.setText(f"当前工况: {self.current_scenario_index}")
+
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.append(f"<font color='blue'>[{timestamp}] 开始连续运行</font>")
+
+        # 执行第一个工况
+        self.execute_current_scenario()
+
+    def execute_current_scenario(self):
+        """执行当前工况"""
+        if not self.is_continuous_running:
+            return
+
+        # 激活当前工况
+        self.activate_full_scenario(self.current_scenario_index)
+
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.append(f"<font color='blue'>[{timestamp}] 执行工况 {self.current_scenario_index}</font>")
+
+        # 获取当前工况后的间隔时间
+        if self.current_scenario_index == 1:
+            interval = self.interval1_spin.value()
+        elif self.current_scenario_index == 2:
+            interval = self.interval2_spin.value()
+        else:  # 工况3
+            interval = self.interval3_spin.value()
+
+        # 设置定时器执行下一个工况
+        self.continuous_timer = QTimer()
+        self.continuous_timer.timeout.connect(self.next_scenario)
+        self.continuous_timer.start(interval * 1000)
+
+    def next_scenario(self):
+        """移动到下一个工况"""
+        if not self.is_continuous_running:
+            return
+
+        # 停止当前定时器
+        if self.continuous_timer and self.continuous_timer.isActive():
+            self.continuous_timer.stop()
+
+        # 移动到下一个工况（循环1→2→3→1→...）
+        if self.current_scenario_index == 3:
+            self.current_scenario_index = 1
+        else:
+            self.current_scenario_index += 1
+
+        # 更新状态显示
+        self.current_scenario_label.setText(f"当前工况: {self.current_scenario_index}")
+
+        # 执行新工况
+        self.execute_current_scenario()
+
+    def stop_continuous_run(self):
+        """停止连续运行"""
+        if not self.is_continuous_running:
+            return
+
+        self.is_continuous_running = False
+
+        # 停止定时器
+        if self.continuous_timer and self.continuous_timer.isActive():
+            self.continuous_timer.stop()
+
+        # 更新按钮状态
+        self.continuous_run_btn.setEnabled(True)
+        self.stop_continuous_btn.setEnabled(False)
+
+        # 更新状态显示
+        self.continuous_status_label.setText("连续运行状态: 已停止")
+        self.continuous_status_label.setStyleSheet("font-weight: bold; color: #2E8B57; font-size: 11pt;")
+        self.current_scenario_label.setText("当前工况: -")
+
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.append(f"<font color='blue'>[{timestamp}] 连续运行已停止</font>")
+
+        # 执行停止工况
+        self.activate_full_scenario(0)
 
     def log_operation_result(self, device_type, device_idx, success, message):
         color = "green" if success else "red"

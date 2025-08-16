@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 # 将项目根目录添加到 sys.path
@@ -66,17 +67,24 @@ class RCFLoader(data.Dataset):
         # 输入为np.array, float32
         pass
 
-    # input_img_stack的输入目前是Image格式，最好也改成torch.tensor。大有可为。
+    # input_img_stack的输入目前是Image格式，最好也改成torch.tensor
     def __getitem__(self, index):
-        img = np.array(self.input_img_stack[index], dtype=np.float32)
-        img_ori = np.array(self.origin_img_stack[index], dtype=np.float32)
-        img = convert_to_rgb(img)  # 确保图像是RGB格式
-        # img = img.resize((img.width // 10, img.height // 10), Image.Resampling.LANCZOS)  # 缩小
-        # img = img.resize((128, 128), Image.Resampling.LANCZOS)
-        # todo 需要根据实际大小确定缩放比例，缩放到200像素左右
-        img = cv2.resize(img, (img.shape[1] // self.k_size, img.shape[0] // self.k_size), interpolation=cv2.INTER_NEAREST)
+        img = self.input_img_stack[index]
+        # img = np.array(self.stack[index], dtype=np.float32)
+        img_ori = self.origin_img_stack[index]
+        # img_ori = np.array(self.stack_ori[index], dtype=np.float32)
 
+        img = convert_to_rgb(img)  # 确保图像是RGB格式
+        img = cv2.resize(img, (img.shape[1] // self.k_size, img.shape[0] // self.k_size),
+                         interpolation=cv2.INTER_NEAREST)
+        # img = cv2.resize(img, (224, 224),
+        #                  interpolation=cv2.INTER_NEAREST)
         img = prepare_image_PIL(img)
+
+        # 转 tensor: CxHxW, 归一化到 [0,1]
+        img = torch.from_numpy(img).float()
+        # 原始图直接转 tensor
+        img_ori = torch.from_numpy(img_ori).float()
 
         return img, img_ori
 
@@ -97,19 +105,22 @@ def rcf_predict(model, predict_loader, save_dir='', device='cuda'):
     # for idx, (image, image_origin) in enumerate(predict_loader):
     for idx in range(predict_loader.length):
         # if idx == 0:
-
+        # st0 = time.time()
         image, image_origin = predict_loader.get_data(idx)      # note: 此处的predict_loader是focusing.py中的get_dataset类
+
         image = image.to(device)
         _, _, H, W = image.shape
-
-        # st0 = time.time()
-        results = model(image)
         # ed0 = time.time()
-        # print('RCF预测', ed0 - st0)
+        # print('get data', ed0 - st0)
+
+        st0 = time.time()
+        results = model(image)
+        ed0 = time.time()
+        print('RCF预测', ed0 - st0)
         result = torch.squeeze(results[-1].detach()).cpu().numpy()
 
-        # 低于10的像素置零
-        # result[result < 5] = 0
+        # else
+        # st0 = time.time()
         result_pil = Image.fromarray((result * 255).astype(np.uint8))
         # result.show()
 
@@ -132,7 +143,8 @@ def rcf_predict(model, predict_loader, save_dir='', device='cuda'):
         if concentration > max_concentration:
             max_concentration = concentration
             best_focus_image = image_origin
-
+        # ed0 = time.time()
+        # print('else', ed0 - st0)
         # # debug用，查看原图及其对应的预测结果
         # img_tmp = torch.squeeze(image_origin.squeeze()).cpu().numpy()
         # result_tmp = (result * 255).astype(np.uint8)
@@ -148,6 +160,143 @@ def rcf_predict(model, predict_loader, save_dir='', device='cuda'):
     return best_focus_image, best_focus_name
 
 
+def rcf_predict_V1(model, predict_loader, save_dir='', device='cuda'):
+    torch.backends.cudnn.benchmark = True
+
+    model.eval()
+    concentrations = []
+    best_focus_image = None
+    best_focus_name = None
+    max_concentration = -np.inf
+
+    # 批量处理所有图像
+    for batch_idx, batch_data in enumerate(predict_loader):
+        # 解包批数据（图像+原始图像）
+        images, images_origin = batch_data
+        images = images.to(device)
+
+        st = time.time()
+
+        # 批量预测
+        with torch.no_grad():
+            results = model(images)
+
+        ed = time.time()
+        print("loading time:", ed - st)
+        # g = torch.cuda.CUDAGraph()
+        # with torch.cuda.graph(g):
+        #     results = model(images)
+
+        # 处理批量结果
+        for i in range(len(images)):
+            result = torch.squeeze(results[-1][i]).cpu().numpy()
+            result_pil = Image.fromarray((result * 255).astype(np.uint8))
+            black_pad = 0
+            result_pil = zero_edge_pixels(result_pil, edge_size=black_pad)
+
+            concentration = calculate_brightness_concentration(np.array(result_pil))
+            concentrations.append(concentration)
+
+            # 边缘检测图像保存
+            # tmp_pth = os.path.join(r'E:\Projects\HoloLabV1\tmp', str(time.time()))
+            # os.mkdir(tmp_pth)
+            # result_pil.save(os.path.join(tmp_pth, "edge_{:3f}.jpg".format(concentration)))
+            # img_ori_tmp = torch.squeeze(images_origin[i].squeeze()).cpu().numpy()
+            # cv2.imwrite(os.path.join(tmp_pth, "image.jpg"), img_ori_tmp)
+
+            # 更新最佳聚焦图像
+            if concentration > max_concentration:
+                max_concentration = concentration
+                # best_focus_image = images_origin[i].cpu().numpy()  # 使用原始图像
+                best_focus_image = images_origin[i] # 使用原始图像
+
+    return best_focus_image, best_focus_name
+
+
+def rcf_predict_V2(model,
+                   predict_loader,
+                   particle_sizes,
+                   device='cuda'):
+    r"""
+    使用一次 forward 处理所有颗粒，并返回每颗粒最佳聚焦的 **原尺寸** 图像
+
+    DataLoader 中一条样本由 pad_collate 组织为
+        imgs_batch      : (B, 3, H_max, W_max)   ──> 进模型
+        img_oris_batch  : (B, H_max, W_max)      ──> 只展示，不进模型
+        orig_sizes      : [(H_img, W_img, H_ori, W_ori), ...]
+    """
+    model.eval()
+
+    # -------------- 1. 收集所有 batch ----------------
+    all_imgs      = []          # (N, 3, H_max, W_max) → concat 后送模型
+    all_oris      = []          # [(H_ori,W_ori) 裁剪后 np.ndarray]
+    img_hw_list   = []          # [(H_img, W_img)] 与 all_imgs 对齐
+
+
+    for imgs_batch, img_oris_batch, orig_sizes in predict_loader:
+        B = imgs_batch.size(0)
+
+        # ① 收集 imgs → 后面一次 cat
+        all_imgs.append(imgs_batch)            # 仍在 CPU，稍后一起 .to(device)
+
+        # ② 把 img_ori 裁回原尺寸，存入 list
+        for j in range(B):
+            h_img, w_img, h_ori, w_ori = orig_sizes[j]
+
+            # 裁剪 ori
+            ori_np = (img_oris_batch[j, :h_ori, :w_ori]    # (H_ori,W_ori)
+                      .cpu()
+                      .numpy())
+
+            all_oris.append(ori_np)
+            img_hw_list.append((h_img, w_img))             # 与 ori 同 index
+
+    # -------------- 2. 一次性 forward -----------------
+    imgs_tensor = torch.cat(all_imgs, dim=0).to(device)    # (N,3,H_max,W_max)
+
+    st = time.time()
+    with torch.no_grad():
+        results = model(imgs_tensor)                       # list/tuple
+        last_feat = results[-1]                            # (N,1,H_max,W_max) 或类似
+    batch_results = last_feat.squeeze(1).cpu().numpy()     # → (N,H_max,W_max)
+    ed = time.time()
+    # -------------- 3. 每颗粒选最佳聚焦 ----------------
+    focused_images = []
+    start_idx = 0
+
+    for p_size in particle_sizes:
+        end_idx = start_idx + p_size
+
+        # 当前颗粒所有帧
+        particle_results = batch_results[start_idx:end_idx]
+        particle_oris    = all_oris[start_idx:end_idx]
+        particle_hw      = img_hw_list[start_idx:end_idx]
+
+        # 选“亮度集中度”最大的一帧
+        best_focus_img   = None
+        max_concentration = -np.inf
+
+        for k in range(p_size):
+            h_img, w_img = particle_hw[k]
+
+            # 裁掉 padding 区域再评估
+            cropped_res = particle_results[k][:h_img, :w_img]
+            res_pil     = Image.fromarray((cropped_res * 255).astype(np.uint8))
+
+            res_pil     = zero_edge_pixels(res_pil, edge_size=0)  # 你的函数
+            conc        = calculate_brightness_concentration(
+                             np.array(res_pil))                   # 你的函数
+
+            if conc > max_concentration:
+                max_concentration = conc
+                best_focus_img    = particle_oris[k]               # 已是原尺寸
+
+        focused_images.append(best_focus_img)
+        start_idx = end_idx
+
+    print("rcf_predict_V2 运行时长：", ed - st, " s")
+    return focused_images
+
 def main():
     yolo_model = YOLO(input_shape=[640, 640],
                       phi='s',
@@ -162,7 +311,7 @@ def main():
     input_folder = r"F:\dongjiayao\Data\HoloLab_testData\autofocus\reconstruction"
     # input_folder = r"F:\dongjiayao\Pycharm\Holo-Track\img\3\temp"
     global output_folder
-    output_folder = r"F:\dongjiayao\Data\HoloLab_testData\autofocus\tmp"
+    output_folder = r"E:\Projects\HoloLabV1\tmp"
     final_folder = r"F:\dongjiayao\Data\HoloLab_testData\autofocus\ai_output"
 
     # 使用示例

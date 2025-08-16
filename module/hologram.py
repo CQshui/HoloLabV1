@@ -210,6 +210,8 @@ class Hologram:
         self.main_wave_parameter(self.config)
         self.main_data_analysis(self.config)
 
+        self.status_msg = 'Ready'
+
     '''全息图像-------------------------------------------------'''
     def main_hologram_infos(self, config):
         ''''''
@@ -270,8 +272,8 @@ class Hologram:
     def main_wave_parameter(self, config):
         ''''''
         '''全息图频谱_________________________________________________'''
-        self.hologram_spectrum_raw = self._make_empty_image()      # 离轴中框选出来的频谱，如有
-        self.hologram_spectrum      = self._make_empty_image()      # 行（高 height）、列（宽 width）
+        self.spectrum_raw           = self._make_empty_image()       # 离轴中框选出来的频谱，如有
+        self.spectrum               = self._make_empty_image()      # 行（高 height）、列（宽 width）
 
         '''初始波前、波前_____________________________________________'''
         self.wave_front_ini         = self._make_empty_image()      # np.zeros(self.hologram.shape, dtype="complex")
@@ -286,16 +288,16 @@ class Hologram:
 
         '''聚焦图、子图、深度图_______________________________________'''
         self.focusing               = self._make_empty_image()
-        self.focusing_each          = []
+        self.focusing_each          = {}
         self.focusing_depth_map     = self._make_empty_image()
 
         '''切割图、子图_______________________________________________'''
         self.segmentation           = self._make_empty_image()
-        self.segmentation_each      = [] # 每个颗粒的切割子图列表，可以是一个list
+        self.segmentation_each      = {} # 每个颗粒的切割子图列表，可以是一个list
 
         '''分类图、分类切割子图_______________________________________'''
         self.identification         = self._make_empty_image()
-        self.identification_each    = [] # 每个颗粒的分类子图列表，可以是一个list
+        self.identification_each    = {} # 每个颗粒的分类子图列表，可以是一个list
 
         '''相位分析___________________________________________________'''
         self.phase                  = self._make_empty_image()
@@ -311,11 +313,26 @@ class Hologram:
     '''定量分析-------------------------------------------------'''
     def main_data_analysis(self, config):
 
+        self.particle_information    = []
+        self.particle_total          = 0
+        self.concentration           = 0
+        self.particle_identification = []
+
+        self.figure_diameter         = None
+        self.figure_classification   = None
+
         self.particle_size  = 0       # 所有颗粒大小，单位m
         self.particle_num   = 0       # 所有颗粒大小，单位m
 
-        self.AOP            = []      # 所有颗粒的AOP，单位°
-        self.DOLP           = []      # 所有颗粒的D值，单位m
+        self.AoP            = []      # 所有颗粒的AOP，单位°
+        self.DoLP           = []      # 所有颗粒的D值，单位m
+        self.aop_each       = {}
+        self.dolp_each      = {}
+
+        self.polar_S0       = []
+        self.polar_S1       = []
+        self.polar_S2       = []
+        self.polar_amp      = []
 
     def save_data(self):
         try:

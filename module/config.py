@@ -15,15 +15,17 @@ class HoloConfig:
     ''''''
     '''图像参数_________________________________________'''
 
-    file_info: Dict[str, Any] = field(default_factory=lambda: {
-        'holo_type'     : "Off-Axis",
+    file_info:              Dict[str, Any] = field(default_factory=lambda: {
+        'holo_type'     : "Inline",
         'holo_type_list': ['Inline', 'Off-Axis'],
-        'image_path'    : r'E:\Projects\HoloLab\test_data\hologram',
-        'image_name'    : 'Image__2024-04-26__20-13-40.bmp',
+        'image_path'    : r'E:\Projects\HoloLabV1\test_data/hologram',
+        'image_name'    : 'inline_multi_particle.jpg'
+        # 'read_mode'     : 'Single Image',
+        # 'read_mode_list': ['Single Image', 'Multi Images']
     })
 
-    image_info: Dict[str, Any] = field(default_factory=lambda: {
-        'pixel_size'        : 0.098,   # um
+    image_info:             Dict[str, Any] = field(default_factory=lambda: {
+        'pixel_size'        : 5.0,   # um
         'wavelength'        : 532.0,   # nm
         'pixel_num_x'       : 'None',
         'pixel_num_y'       : 'None',
@@ -38,72 +40,103 @@ class HoloConfig:
     })
 
     '''处理参数_________________________________________'''
-    pre_process: Dict[str, Any] = field(default_factory=lambda: {
+    pre_process:            Dict[str, Any] = field(default_factory=lambda: {
         'method'            : 'Subtraction',
         'method_list'       : ['None', 'Subtraction', 'AVG-Subtraction','FFT', 'AI'],
         'coeff'             : 0.5,
         'reserve_1'         : 'None',
-        'background_path'   : r'E:\Projects\HoloLab\test_data/preprocessing',
+        'background_path'   : r'E:\Projects\HoloLabV1\test_data/preprocessing',
         'background_name'   : 'inline_multi_particle.jpg',
-        'model_path'        : r'E:\Projects\HoloLab/models/pre_process',
+        'model_path'        : r'E:\Projects\HoloLabV1\test_data/pre_process',
         'model_name'        : 'model_name'
     })
 
-    spectrum: Dict[str, Any] = field(default_factory=lambda: {
+    polarization:           Dict[str, Any] = field(default_factory=lambda: {
+        'split_image'       : True,  # 分离四个偏振态
+        'split_mode'        : 'quadrant',
+        'split_mode_list'   : ['quadrant', 'super_pixel'],
+
+        'polar_coeff'       : False,  # 计算高阶偏振量
+        'device'            : 'cpu',
+        'device_list'       : ['gpu', 'cpu'],
+    })
+
+    spectrum:               Dict[str, Any] = field(default_factory=lambda: {
         'method'            : 'Manual_Select',
-        'method_list'       : ['None', 'Manual_Select', 'Give_Values', 'Auto_Define', 'FFT', 'AI'],
+        'method_list'       : ['Manual_Select', 'Give_Values', 'Auto_Define'],
         'center_mask_radius': 100,
         'threshold'         : 180,
-        'reserve_1'         : 'None',
-        'model_path'        : r'E:\Projects\HoloLab/models/spectrum',
-        'model_name'        : 'model_name',
         'ROI_rectangle'     : {
             'center_x'      : 50,
             'center_y'      : 50,
             'rect_width'    : 50,
             'rect_height'   : 50
         },
+        'model_path'        : 'E:\Projects\HoloLabV1\models/spectrum',
+        'model_name'        : 'model_name'
     })
 
-    reconstruction: Dict[str, Any] = field(default_factory=lambda: {
-        'method'        : 'Angular_GPU',
-        'method_list'   : ['Angular_CPU', 'Angular_GPU'],
+    reconstruction:         Dict[str, Any] = field(default_factory=lambda: {
+        'method'        : 'Angular_CPU',
+        'method_list'   : ['Angular_CPU', 'Angular_GPU', 'Fresnel', 'AI'],
+        'model_path'    : 'E:\Projects\HoloLabV1\models/reconstruction',
+        'model_name'    : 'model_name',
+        'cpu_num'       : 10,
+        'gpu_num'       : 1,
+        'z_start'       : 60.0,     # 实际需要 * unit_mm
+        'z_end'         : 85.0,     # 实际需要 * unit_mm
+        'z_step'        : 1.00     # 实际需要 * unit_mm
+    })
+
+    focusing_BackUP:        Dict[str, Any] = field(default_factory=lambda: {
+        'method'        : 'AI_Gradient',
+        'method_list'   : ['Wavelet', 'Gradient', 'AI', 'AI_Wavelet', 'AI_Gradient'],
         'reserve_1'     : 'None',
-        'model_path'    : r'E:\Projects\HoloLab/models/reconstruction',
+        'model_path'    : 'E:\Projects\HoloLabV1\models/focusing',
         'model_name'    : 'model_name',
         'cpu_num'       : 1,
-        'gpu_num'       : 1,
-        'z_start'       : 0.15,  # 实际需要 * unit_mm
-        'z_end'         : 0.20, # 实际需要 * unit_mm
-        'z_step'        : 0.01   # 实际需要 * unit_mm
+        'gpu_num'       : 1
     })
-
-    focusing: Dict[str, Any] = field(default_factory=lambda: {
-        'method': 'AI_Wavelet',
-        'method_list': ['Wavelet', 'Gradient', 'AI', 'AI_Wavelet', 'AI_Gradient'],
-        'yolo_model_path': r'E:\Projects\HoloLab\models\yolo_detection.pth',
-        'rcf_model_path': r'E:\Projects\HoloLab\models\rcf_edge_detection.pth',
-        'cpu_num': 1,  # cpu线程数
-        'gpu_id': 0,
-        'device': 'cpu',
-        'device_list': ['cuda', 'cpu'],
-        'rcf_scale': 8,  # rcf所处理图像的缩放倍率，图像原尺寸要/rcf_scale
-        'batch_root': r'F:\liujianli\data\experiment_data\20250424\results',
+    focusing:               Dict[str, Any] = field(default_factory=lambda: {
+        'method'            : 'AI_Gradient',
+        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient'],
+        'yolo_model_path'   : r'E:\Projects\HoloLabV1\models/focusing/yolo_detection.pth',
+        'rcf_model_path'    : r'E:\Projects\HoloLabV1\models/focusing/rcf_edge_detection.pth',
+        'rcf_scale'         : 2,  # rcf所处理图像的缩放倍率，图像原尺寸要/scale
+        'device'            : 'cuda',
+        'device_list'       : ['cuda', 'cpu'],
+        'cpu_num'           : 8,
+        'gpu_id'            : 0,
+        'batch_root'        : r'E:\Projects\HoloLabV1\test_data\batch test',
         # 批量处理：根目录，下有每个图像对应子文件夹，子文件夹内部有reconstruction文件夹存放重建图像
-        'get_model': False,  # 批量处理：如果为True，将直接给Focus类传入模型本身，而不是根据路径加载模型
+        'get_model'         : False  # 批量处理：如果为True，将直接给Focus类传入模型本身，而不是根据路径加载模型
     })
 
-    segmentation: Dict[str, Any] = field(default_factory=lambda: {
-        'method'        : 'AI',
-        'method_list'   : ['Angular Spectrum', 'Fresnel', 'AI'],
+    segmentation_BackUP:    Dict[str, Any] = field(default_factory=lambda: {
+        'method'        : 'Deep_Learning',
+        'method_list'   : ['Global_Threshold', 'Adaptive_Threshold', 'Deep_Learning'],
         'gray_thresh'   : 127,
         'block_size'    : 32,
-        'reserve_1'     : 'None',
-        'model_path'    : r'E:\Projects\HoloLab/models/segmentation',
+        'model_path'    : 'E:\Projects\HoloLabV1\models/segmentation',
         'model_name'    : 'model_name',
     })
+    segmentation:           Dict[str, Any] = field(default_factory=lambda: {
+        'type'          : 'holo',
+        'type_list'     : ['holo', 'polar'],
+        'method'        : 'Deep_Learning',
+        'method_list'   : ['Deep_Learning', 'Global_Threshold', 'Adaptive_Threshold'],
+        'gray_thresh'   : 100,
+        'block_size'    : 32,
+        'device'        : 'cpu',  # 'cuda' or 'cpu'
+        'device_list'   : ['cuda', 'cpu'],
+        'cpu_num'       : 8,
+        'gpu_num'       : 1,
+        'model_path'    : r'E:\Projects\HoloLabV1\models/segmentation/78_iou_0.9460_F1_0.9719.pth',
+        'model_name'    : 'segmentation',
+        'output_dir'    : r'E:\Projects\HoloLabV1/results'
+    })
 
-    identification: Dict[str, Any] = field(default_factory=lambda: {
+    identification_BackUP:  Dict[str, Any] = field(default_factory=lambda: {
         'method'        : 'AI',
         'method_list'   : ['Angular Spectrum', 'Fresnel', 'AI'],
         'type'          : 'Nisha',
@@ -113,21 +146,33 @@ class HoloConfig:
             'GL'        : ['AAA', 'BBB', 'CCC']
         },
         'reserve_1'     : 'None',
-        'model_path'    : r'E:\Projects\HoloLab/models/identification',
+        'model_path'    : 'E:\Projects\HoloLabV1/models/identification',
         'model_name'    : 'model_name',
     })
+    identification:         Dict[str, Any] = field(default_factory=lambda: {
+        'method'        : 'onlyholo',
+        'method_list'   : ['onlyholo', 'polar'],
+        'type'          : 'Nisha',
+        'type_dict'     :{
+            'Nisha'     : ['gaoyingshi', 'nachangshi', 'shiyingshi', 'yilishi'],
+            'Pla'       : ['AAA', 'BBB', 'CCC'],
+            'GL'        : ['AAA', 'BBB', 'CCC']
+        },
+        'model_path'    : r'E:\Projects\HoloLabV1/models/identification/gao,na,shi,yi/amplitude',
+        'model_name'    : '2025.0407_gao,na,shi,yi.pth',
+    })
 
-    phase: Dict[str, Any] = field(default_factory=lambda: {
+    phase:                  Dict[str, Any] = field(default_factory=lambda: {
         'method'        : 'AI',
         'method_list'   : ['Angular Spectrum', 'Fresnel', 'AI'],
         'reserve_1'     : 'None',
-        'model_path'    : r'E:\Projects\HoloLab/models/phase',
+        'model_path'    : 'E:\Projects\HoloLabV1/models/phase',
         'model_name'    : 'model_name'
     })
 
-    data_summary: Dict[str, Any] = field(default_factory=lambda: {
+    data_summary_BackUP:    Dict[str, Any] = field(default_factory=lambda: {
         'density'   : 'None',
-        'model_path': r'E:\Projects\HoloLab/models/data_analysis',
+        'model_path': 'E:\Projects\HoloLabV1/models/data_analysis',
         'model_name': 'model_name',
         'show_size_distribution'    : True,
         'show_concentration_time'   : False,
@@ -135,14 +180,28 @@ class HoloConfig:
         'show_R90_distribution'     : False,
         'show_R200_distribution'    : False,
     })
+    data_summary:           Dict[str, Any] = field(default_factory=lambda: {
+        'density'       : {'gaoyingshi':4.5, 'nachangshi':2.6, 'shiyingshi': 2.6, 'yilishi':2.6},
+        'method'        : 'onlyholo',
+        'method_list'   : ['onlyholo', 'polar'],
+        'type'          : 'Nisha',
+        'type_dict'     : {
+            'Nisha': ['gaoyingshi', 'nachangshi', 'shiyingshi', 'yilishi'],
+            'Pla': ['AAA', 'BBB', 'CCC'],
+            'GL': ['AAA', 'BBB', 'CCC']
+        },
+        'save_size'         : True,
+        'save_concentration': True,
+        'save_category'     : True
+    })
 
-    save_and_load: Dict[str, Any] = field(default_factory=lambda: {
-        'config_save_path'      : r'E:\Projects\HoloLab/results',
+    save_and_load:          Dict[str, Any] = field(default_factory=lambda: {
+        'config_save_path'      : 'E:\Projects\HoloLabV1/results',
         'config_save_name'      : 'config.json',
-        'config_load_path'      : r'E:\Projects\HoloLab/results',
+        'config_load_path'      : 'E:\Projects\HoloLabV1/results',
         'config_load_name'      : 'config_.json',
 
-        'data_load_path'        : r'E:\Projects\HoloLab/results',
+        'data_load_path'        : 'E:\Projects\HoloLabV1/results',
         'data_load_name'        : 'data___50.npz',
         'data_NPZ_only'         : True,
 
@@ -151,7 +210,7 @@ class HoloConfig:
 
         'data_save_method'      : 'NPZ Data',
         'data_save_method_list' : ['NPZ Data', 'Image - BMP', 'Image - PNG', 'Image - JPG'],
-        'data_save_path'        : r'E:\Projects\HoloLab/results',
+        'data_save_path'        : 'E:\Projects\HoloLabV1/results',
         'data_save_name'        : 'data.npz',
         'save_all'              : False,
         'save_raw_hologram'     : True,
@@ -166,7 +225,7 @@ class HoloConfig:
         'save_data_summary'     : True
     })
 
-    operation_options: Dict[str, Any] = field(default_factory=lambda: {
+    operation_options:      Dict[str, Any] = field(default_factory=lambda: {
         'run_open_image'       : True,
         'run_preprocessing'    : False,
         'run_polarization'     : False,
@@ -179,14 +238,20 @@ class HoloConfig:
         'run_data_summary'     : False
     })
 
-    multi_processing: Dict[str, Any] = field(default_factory=lambda: {
-        'images_path'            : r'E:\Projects\HoloLab/test_data/hologram',
+    operator_model_load:    Dict[str, Any] = field(default_factory=lambda: {          # todo, 景深拓展批量处理时，不重复加载模型
+        'focusing'          : None,
+    })
+
+    multi_processing:       Dict[str, Any] = field(default_factory=lambda: {
+        'images_path'            : 'E:\Projects\HoloLabV1/test_data/batch test',
         'images_name_suffix'     : 'any',
         'images_name_suffix_list': ['any', 'bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff'],
         'max_handle_num'         : None,
         'images_urls'           : [],
+        'containt_non_image'    : False,
+        'non_images_urls'       : [],
         'run_open_image'        : True,
-        'run_preprocessing'     : True,
+        'run_preprocessing'     : False,
         'run_polarization'      : False,
         'run_spectrum'          : True,
         'run_reconstruction'    : True,

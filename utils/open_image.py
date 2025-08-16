@@ -10,12 +10,13 @@ from module.hologram import Hologram
 from module.config import HoloConfig
 
 class OpenImage():
-    def __init__(self, hologram, config, mode = 'single'):
+    def __init__(self, hologram, config, mode = 'Single Image'):
+        self._hologram      = hologram
         self.config         = config
-        self.mode           = mode  # single or multi
 
         self.holo_type      = self.config.file_info.get('holo_type', None)
         self.holo_type_list = self.config.file_info.get('holo_type_list', None)
+        self.mode           = mode # self.config.file_info.get('read_mode', None)  # single or multi
 
         'single'
         self.image_path     = self.config.file_info.get('image_path', None)
@@ -33,22 +34,29 @@ class OpenImage():
         self.images_name_suffix = self.config.multi_processing['images_name_suffix']
         self.images_name_suffix = "*" if self.images_name_suffix == 'any' else self.images_name_suffix
 
+        if 1:
+            self.save_action    = config.save_and_load['save_raw_hologram']
+            self.creat_sub_dir  = config.save_and_load['creat_sub_dir']
+
+            self.save_path      = config.save_and_load['data_save_path']
+            self.image_name     = os.path.splitext(config.file_info['image_name'])[0]
+
     def run(self):
         # OpenCV的cv2.imread()函数，当路径无效、读取错误时，不会抛出异常，而是静默返回 None，因此这里没用 try-except
 
-        if self.mode =='single':
+        if self.mode =='Single Image':
             '''若路径有误'''
             if not os.path.exists(self.image_url):
-                status_msg = f"Image not found: {self.image_url}"
-                return self.hologram_raw, self.hologram, self._image_loaded, status_msg
+                self.status_msg = f"Image not found: {self.image_url}"
+                return self.hologram_raw, self.hologram, self._image_loaded, self.status_msg
 
             self.hologram_raw = cv2.imread(self.image_url, cv2.IMREAD_GRAYSCALE)
             self.hologram     = cv2.imread(self.image_url, cv2.IMREAD_GRAYSCALE)
 
             '''若格式问题，判断图像是否正确加载'''
             if self.hologram_raw is None:
-                status_msg = f"Failed to load image (invalid format or corrupted file): {image_url}"
-                return self.hologram_raw, self.hologram, self._image_loaded, status_msg
+                self.status_msg = f"Failed to load image (invalid format or corrupted file): {image_url}"
+                return self.hologram_raw, self.hologram, self._image_loaded, self.status_msg
 
             '''图像加载成功'''
             self._image_loaded = True
@@ -60,40 +68,56 @@ class OpenImage():
             find_peaks = self._holo_type_judgement()
             self.holo_type = self.holo_type_list[1] if find_peaks else self.holo_type_list[0]
 
-            status_msg = f"Image opened (may be '{self.holo_type}'): {self.image_url}"
-            return self.hologram_raw, self.hologram, self._image_loaded, self.image_height, self.image_width, self.holo_type, status_msg
+            self.status_msg = f"Image opened (may be '{self.holo_type}'): {self.image_url}"
+            # return self.hologram_raw, self.hologram, self._image_loaded, self.image_height, self.image_width, self.holo_type, self.status_msg
 
         else:
-
             if not os.path.exists(self.images_path):
-                status_msg = f"No Image found in: {self.images_path}"
-                return [], status_msg, [], []
+                self.status_msg = f"No Image found in: {self.images_path}"
+                return [], self.status_msg, [], []
 
             search_pattern = os.path.join(self.images_path, f"*{self.images_name_suffix}")
-            self.images_urls = sorted(glob.glob(search_pattern))
-            self.images_urls = [f for f in self.images_urls if os.path.isfile(f)]
+            self.files_urls = sorted(glob.glob(search_pattern))
+            self.files_urls = [f for f in self.files_urls if os.path.isfile(f)]
 
             # 检查是否包含非图片内容
-            containts_non_image = False
-            ALLOWED_EXTENSIONS  = {'.bmp', '.jpg', '.jpeg', '.png', '.tif', '.tiff'}
-            image_files         = []
-            non_image_files     = []
+            _extensions             = {'.bmp', '.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+            self.containt_non_image = False
+            self.images_urls        = []
+            self.non_image_urls     = []
 
-            for f in self.images_urls:
+            for f in self.files_urls:
                 if os.path.isfile(f):
                     ext = os.path.splitext(f)[1].lower()  # 获取小写扩展名
-                    if ext in ALLOWED_EXTENSIONS:
-                        image_files.append(f)
+                    if ext in _extensions:
+                        self.images_urls.append(f)
                     else:
-                        non_image_files.append(f)
+                        self.non_image_urls.append(f)
 
-            if non_image_files:
-                containts_non_image = True
-                status_msg          = f"Found Non-image files: {non_image_files}"
-                return self.images_urls, status_msg, containts_non_image, non_image_files
+            if self.non_image_urls:
+                self.containt_non_image  = True
+                self.status_msg          = f"Found Non-image files: {self.non_image_urls}"
             else:
-                status_msg = f"{len(self.images_urls)} images found in {self.images_path}"
-                return self.images_urls, status_msg, containts_non_image, non_image_files
+                self.status_msg          = f"{len(self.files_urls)} images found in {self.images_path}"
+
+        self.modify_hologram_and_config()
+
+    def modify_hologram_and_config(self):
+        if self.mode == 'Single Image':
+            self._hologram.hologram_raw             = self.hologram_raw
+            self._hologram.hologram                 = self.hologram
+            self._hologram._image_loaded            = self._image_loaded
+            self._hologram.status_msg               = self.status_msg
+
+            self.config.file_info['holo_type']      = self.holo_type
+            self.config.image_info['pixel_num_x']   = self.image_height
+            self.config.image_info['pixel_num_y']   = self.image_width
+
+        else:
+            self.config.multi_processing['images_urls']         = self.images_urls
+            self.config.multi_processing['non_images_urls']     = self.non_image_urls
+            self.config.multi_processing['containt_non_image']  = self.containt_non_image
+            self._hologram.status_msg = self.status_msg
 
     def _holo_type_judgement(self):
 
@@ -132,7 +156,6 @@ class OpenImage():
             plt.show()
 
         return np.any(peaks)
-
 
 if __name__ == '__main__':
 

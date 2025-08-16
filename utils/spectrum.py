@@ -6,17 +6,20 @@ import numpy as np
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.widgets import RectangleSelector
+from scipy.ndimage import center_of_mass
 
-class Spectrum_ME():
+class Spectrum:
     def __init__(self, hologram=None, config=None):
+        # 输入数据
+        self.hologram_raw = hologram.hologram_raw
+        self.hologram     = hologram.hologram
+        self.spectrum_raw = hologram.spectrum_raw
+        self.spectrum     = hologram.spectrum
 
-        self.hologram_raw           = hologram.hologram_raw
-        self.hologram               = hologram.hologram
-        self.hologram_spectrum      = hologram.hologram_spectrum
-        self.hologram_spectrum_side = hologram.hologram_spectrum_side
-
+        self.image_name   = config.file_info['image_name']
+        self.holo_type    = config.file_info['holo_type']
         self.method       = config.spectrum['method']
-
         self.pixel_size   = config.image_info['pixel_size']
         self.wavelength   = config.image_info['wavelength']
 
@@ -25,17 +28,156 @@ class Spectrum_ME():
         self.roi_width    = config.spectrum['ROI_rectangle']['rect_width']
         self.roi_height   = config.spectrum['ROI_rectangle']['rect_height']
 
+        # 保留原始对象用于修改
+        self._hologram = hologram
+        self._config   = config
+
     def run(self):
-        return self.hologram_spectrum, self.hologram_spectrum_side
+        self.spectrum_raw = self.Get_Spectrum()
 
-    def Get_Spectrum_Manual_Select(self, image):
-        a = 1
-    def Get_Spectrum_Give_Values(self, image, rect_center_x, rect_center_y, rect_width, rect_height, show_image = 1):
-        a = 1
-    def Get_Spectrum_Auto_Define(self, image):
-        a = 1
+        '''Inline / Off-Axis'''
+        if self.holo_type == 'Inline':
+            # Inline 类型直接使用 spectrum_raw
+            self.spectrum = self.spectrum_raw
+        else:
+            if self.method == 'Manual_Select':
+                self.spectrum = self.Get_Spectrum_Manual_Select()
+                self.move_ROI_to_center()
+            elif self.method == 'Give_Values':
+                self.spectrum = self.Get_Spectrum_Give_Values()
+                self.move_ROI_to_center()
+            elif self.method == 'Auto_Define':
+                self.spectrum = self.Get_Spectrum_Auto_Define()
+                self.move_ROI_to_center()
+            else:
+                raise ValueError(f"Unknown spectrum method: {self.method}")
 
-class Spectrum():
+        self.modify_hologram_and_config()
+
+    def modify_hologram_and_config(self):
+        # 更新 hologram 对象
+        self._hologram.spectrum_raw = self.spectrum_raw
+        self._hologram.spectrum     = self.spectrum
+        self._hologram.status_msg   = 'Spectrum Analysis Done'
+
+        # 更新 config 中 ROI 区域参数
+        self._config.spectrum['ROI_rectangle']['center_x']      = self.roi_center_x
+        self._config.spectrum['ROI_rectangle']['center_y']      = self.roi_center_y
+        self._config.spectrum['ROI_rectangle']['rect_width']    = self.roi_width
+        self._config.spectrum['ROI_rectangle']['rect_height']   = self.roi_height
+
+    def move_ROI_to_center(self):
+        h, w = self.spectrum.shape
+
+        # 原 ROI 坐标
+        x0 = int(self.roi_center_x - self.roi_width // 2)
+        y0 = int(self.roi_center_y - self.roi_height // 2)
+        x1 = x0 + self.roi_width
+        y1 = y0 + self.roi_height
+
+        # 截取 ROI 区域
+        roi = self.spectrum[y0:y1, x0:x1]
+
+        # 创建空图并将 ROI 移动到中心
+        new_spectrum = np.zeros_like(self.spectrum, dtype=self.spectrum.dtype)
+        cx = w // 2
+        cy = h // 2
+
+        # 目标区域坐标
+        new_x0 = cx - self.roi_width // 2
+        new_y0 = cy - self.roi_height // 2
+        new_x1 = new_x0 + self.roi_width
+        new_y1 = new_y0 + self.roi_height
+
+        new_spectrum[new_y0:new_y1, new_x0:new_x1] = roi
+
+        self.spectrum = new_spectrum
+
+    def Get_Spectrum(self):
+        return np.fft.fftshift(np.fft.fft2(self.hologram))
+
+    def Get_Spectrum_Manual_Select(self):
+        fig, ax = plt.subplots(figsize=(7, 7))
+        fig.canvas.manager.set_window_title('Spectrum ROI Selection Tool')
+
+        ax.imshow(np.log1p(np.abs(self.spectrum_raw)), cmap='gray')
+        ax.set_title(self.image_name)
+
+        roi = {}
+
+        def onselect(eclick, erelease):
+            x0, y0 = int(eclick.xdata), int(eclick.ydata)
+            x1, y1 = int(erelease.xdata), int(erelease.ydata)
+
+            roi['x'] = min(x0, x1)
+            roi['y'] = min(y0, y1)
+            roi['width'] = abs(x1 - x0)
+            roi['height'] = abs(y1 - y0)
+
+            self.roi_center_x = roi['x'] + roi['width'] // 2
+            self.roi_center_y = roi['y'] + roi['height'] // 2
+            self.roi_width = roi['width']
+            self.roi_height = roi['height']
+
+            plt.close()
+
+        toggle_selector = RectangleSelector(
+            ax, onselect, interactive=True, useblit=True,
+            button=[1], minspanx=5, minspany=5, spancoords='pixels',
+            props=dict(facecolor='red', edgecolor='black', alpha=0.2, fill=True)
+        )
+
+        plt.tight_layout()
+        plt.show()
+
+        if roi:
+            y0 = roi['y']
+            x0 = roi['x']
+            y1 = y0 + roi['height']
+            x1 = x0 + roi['width']
+
+            mask = np.zeros_like(self.spectrum_raw, dtype=self.spectrum_raw.dtype)
+            mask[y0:y1, x0:x1] = self.spectrum_raw[y0:y1, x0:x1]
+            return mask
+        else:
+            print("No ROI selected, using raw spectrum")
+            return self.spectrum_raw
+
+    def Get_Spectrum_Give_Values(self):
+        x0 = int(self.roi_center_x - self.roi_width // 2)
+        y0 = int(self.roi_center_y - self.roi_height // 2)
+        x1 = x0 + self.roi_width
+        y1 = y0 + self.roi_height
+
+        mask = np.zeros_like(self.spectrum_raw, dtype=self.spectrum_raw.dtype)
+        mask[y0:y1, x0:x1] = self.spectrum_raw[y0:y1, x0:x1]
+        return mask
+
+    def Get_Spectrum_Auto_Define(self):
+        magnitude = np.abs(self.spectrum_raw)
+        log_magnitude = np.log1p(magnitude)
+
+        h, w = log_magnitude.shape
+        mask = np.ones_like(log_magnitude)
+        cx, cy = w // 2, h // 2
+        mask[cy - 20:cy + 20, cx - 20:cx + 20] = 0
+        masked = log_magnitude * mask
+
+        y_peak, x_peak = np.unravel_index(np.argmax(masked), masked.shape)
+
+        self.roi_center_x = x_peak
+        self.roi_center_y = y_peak
+
+        x0 = int(x_peak - self.roi_width // 2)
+        y0 = int(y_peak - self.roi_height // 2)
+        x1 = x0 + self.roi_width
+        y1 = y0 + self.roi_height
+
+        mask = np.zeros_like(self.spectrum_raw, dtype=self.spectrum_raw.dtype)
+        mask[y0:y1, x0:x1] = self.spectrum_raw[y0:y1, x0:x1]
+        return mask
+
+class Spectrum_LiuJL():
     def __init__(self, hologram, config):
 
         self.hologram = hologram.hologram
@@ -194,7 +336,7 @@ class Spectrum():
             # offangle_y = np.arcsin(self.wave_length * delta_pixely / (self.image_height * self.pixel_size))
             # offangle = np.arctan(np.sqrt(np.tan(offangle_x) ** 2 + np.tan(offangle_y) ** 2))
             # offangle = np.degrees(offangle)
-            # print(f"离轴角: {offangle:.2f} 度")
+            print(f"离轴角: {offangle:.2f} 度")
 
     def Get_Spectrum_Give_Values(self):
         self.get_hologram_spectrum()
@@ -390,7 +532,6 @@ class Spectrum():
         # offangle = np.degrees(offangle)
         # print(f"离轴角: {offangle:.2f} 度")
         # return self.hologram_spectrum0
-
 
 if __name__ == '__main__':
     print('Utils Spectrum Module', end='\n\n')
