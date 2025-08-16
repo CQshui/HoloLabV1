@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QGroupBox, QLabel, QPushButton, QComboBox, QSpinBox,
                              QDoubleSpinBox, QTextEdit, QMessageBox, QTabWidget, QFrame,
                              QGridLayout, QSizePolicy)
+
 from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
 from PyQt6.QtGui import QFont, QColor
 from pymodbus.client import ModbusSerialClient as ModbusClient
@@ -105,12 +106,51 @@ class SV113Controller:
             self._write_word(0x00C8, 0x0000)
 
     def restart_driver(self):
-        """重启驱动器（回零操作）"""
+        # """重启驱动器（回零操作）"""
+        # try:
+        #     # 向0x00D4寄存器的BIT15写入1来重启驱动器
+        #     restart_command = 0x0100  # BIT15 = 1, 其他位为0
+        #     self._write_word(0x00D4, restart_command)
+        #     print("驱动器重启指令已发送")
+        #     return True
+        """回零操作 - 改为正向移动70000脉冲"""
         try:
-            # 向0x00D4寄存器的BIT15写入1来重启驱动器
-            restart_command = 0x0100  # BIT15 = 1, 其他位为0
-            self._write_word(0x00D4, restart_command)
-            print("驱动器重启指令已发送")
+            # 获取当前位置
+            current_position = self.get_position()
+            # 计算目标位置（当前位置 + 70000）
+            target_position = current_position + 70000
+
+            # 设置速度（50 RPM）
+            speed_units = int(50 * 100)
+            self._write_dword(0x00D8, speed_units)
+
+            # 设置加减速时间
+            self._write_word(0x000A, 250)
+
+            # 移动到目标位置
+            self._write_dword(0x00E8, target_position)
+
+            print(f"回零操作：从 {current_position} 移动到 {target_position}")
+
+            # 启动后台线程等待移动完成
+            def wait_and_set():
+                try:
+                    while True:
+                        # 使用非阻塞方式获取位置
+                        current_pos = self.get_position()
+                        if current_pos >= target_position:
+                            break
+                        time.sleep(0.5)  # 短暂休眠避免CPU占用过高
+
+                    # 到达目标位置后设置新位置
+                    self.set_current_position(60000)
+                    print("回零完成，位置已设置为60000")
+                except Exception as e:
+                    print(f"回零过程中出错: {e}")
+
+            # 启动后台线程
+            threading.Thread(target=wait_and_set, daemon=True).start()
+
             return True
         except Exception as e:
             error_msg = str(e).lower()
@@ -1618,7 +1658,7 @@ class IntegratedControlApp(QMainWindow):
                 'pumps': [(0, False, 5), (1, True, 600)],
                 'motor': [
                     {'func': 'homing'},  # 电机回零
-                    {'func': 'set_limits', 'args': (50000, 60000)},  # 设置限位
+                    {'func': 'set_limits', 'args': (30000, 60000)},  # 设置限位
                     {'func': 'jog', 'args': (1, 50)},  # 点动下降直到负限位
                 ]
             },
@@ -1647,7 +1687,7 @@ class IntegratedControlApp(QMainWindow):
                     (60, {'device_type': 'pump', 'device_idx': 1, 'func': 'stop_pump'})
                 ],
                 'motor': [
-                    {'func': 'set_limits', 'args': (30000, 50000)},  # 设置限位
+                    {'func': 'set_limits', 'args': (10000, 30000)},  # 设置限位
                     {'func': 'jog', 'args': (1, 50)},  # 点动下降直到负限位
                 ]
             },
