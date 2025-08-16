@@ -9,7 +9,7 @@ import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QLabel, QPushButton, QComboBox, QSpinBox,
                              QDoubleSpinBox, QTextEdit, QMessageBox, QTabWidget, QFrame,
-                             QGridLayout)
+                             QGridLayout, QSizePolicy)
 from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
 from PyQt6.QtGui import QFont, QColor
 from pymodbus.client import ModbusSerialClient as ModbusClient
@@ -1368,6 +1368,7 @@ class IntegratedControlApp(QMainWindow):
         scenario_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         scenario_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scenario_title.setStyleSheet("color: #2E8B57; margin: 10px 0;")
+        scenario_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)        # 控制尺寸，不要占据完全空间
         scenario_layout.addWidget(scenario_title)
 
         # 工况按钮网格
@@ -1455,6 +1456,7 @@ class IntegratedControlApp(QMainWindow):
         btn_grid.addWidget(close_btn, 0, 3)
 
         scenario_layout.addLayout(btn_grid)
+        # scenario_layout.addStretch()
 
         # 添加分隔线
         separator = QFrame()
@@ -1544,10 +1546,12 @@ class IntegratedControlApp(QMainWindow):
         self.continuous_status_layout = QHBoxLayout()
         self.continuous_status_label = QLabel("连续运行状态: 未启动")
         self.continuous_status_label.setStyleSheet("font-weight: bold; color: #2E8B57; font-size: 11pt;")
+        self.continuous_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.continuous_status_layout.addWidget(self.continuous_status_label)
 
         self.current_scenario_label = QLabel("当前工况: -")
         self.current_scenario_label.setStyleSheet("font-weight: bold; color: #FF6B35; font-size: 11pt;")
+        self.current_scenario_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.continuous_status_layout.addWidget(self.current_scenario_label)
 
         continuous_layout.addLayout(self.continuous_status_layout)
