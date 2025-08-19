@@ -24,6 +24,37 @@ class HoloConfig:
         # 'read_mode_list': ['Single Image', 'Multi Images']
     })
 
+    '''相机参数_________________________________________'''
+    camera: Dict[str, Any] = field(default_factory=lambda: {
+        'camera_name': 'No Camera',
+        'camera_type': 'Regular',
+        'camera_type_list': ['Regular', 'Polar'],
+        'sensor_size': 'N/A',
+        # 'pixel_size'        : 3.45,
+
+        'exposure_time': 2000,
+        'frame_rate': 5,
+        'gain': 0,
+        'image_width': 1000,
+        'image_height': 1000,
+        'offset_x': 0,
+        'offset_y': 0,
+        'center_x': True,
+        'center_y': True,
+
+        'num_to_save': 5,
+        'save_path': 'D:/Development/HoloLab/test_data/camera',
+        'record_mode': 'single',
+        'record_mode_list': ['single', 'multiple'],
+        'save_format': 'jpg',
+        'save_format_list': ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff'],
+        'jpg_quality': 100,
+
+        'enable_balance_white': False,  # 是否设置白平衡
+        'enable_ultrashort_exposure': False,  # 是否设置超短曝光
+        'enable_gain_mode': False,  # 是否设置增益模式
+    })
+
     image_info:             Dict[str, Any] = field(default_factory=lambda: {
         'pixel_size'        : 5.0,   # um
         'wavelength'        : 532.0,   # nm

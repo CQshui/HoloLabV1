@@ -1,29 +1,733 @@
+import os
 import sys
 import threading
 import queue
+from datetime import datetime
 from enum import Enum
 
+import numpy as np
 import serial
 import serial.tools.list_ports
 import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QLabel, QPushButton, QComboBox, QSpinBox,
                              QDoubleSpinBox, QTextEdit, QMessageBox, QTabWidget, QFrame,
-                             QGridLayout, QSizePolicy)
+                             QGridLayout, QSizePolicy, QFileDialog, QLineEdit)
 
-from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt, QThread
+from PyQt6.QtGui import QFont, QColor, QImage, QMouseEvent, QPixmap
 from pymodbus.client import ModbusSerialClient as ModbusClient
 from pymodbus.exceptions import ModbusException
+from pypylon import pylon
 
+
+class GrabThread(QThread):
+    frame_ready = pyqtSignal(np.ndarray)
+
+    def __init__(self, camera):
+        super().__init__()
+        self.camera = camera
+        self._running = False
+        self.frame_interval = max(5, int(1000 / camera.config['frame_rate']))
+
+    def run(self):
+        self._running = True
+        while self._running:
+            start_time = time.perf_counter()
+
+            try:
+                frame = self.camera.grab_frame()
+                if frame is not None:
+                    frame = np.ascontiguousarray(frame)
+                    if frame.size > 0:
+                        self.frame_ready.emit(frame)
+            except Exception as e:
+                print(f"采集线程错误: {e}")
+                continue
+
+            elapsed = (time.perf_counter() - start_time) * 1000
+            if elapsed < self.frame_interval:
+                self.msleep(int(self.frame_interval - elapsed))
+
+    def stop(self):
+        self._running = False
+        self.wait(500)
+
+
+class RecordingThread(QThread):
+    finished = pyqtSignal()
+    progress = pyqtSignal(int, int)
+    error = pyqtSignal(str)
+
+    def __init__(self, camera, record_mode):
+        super().__init__()
+        self.camera = camera
+        self.record_mode = record_mode
+        self._stop_flag = False
+        self.was_grabbing = False
+
+    def run(self):
+        try:
+            self._prepare_recording()
+
+            if self.record_mode == 'single':
+                self._record_single()
+            else:
+                self._record_batch()
+
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
+            self._restore_state()
+
+    def stop(self):
+        self._stop_flag = True
+
+    def _prepare_recording(self):
+        self.was_grabbing = (self.camera.grab_thread and self.camera.grab_thread.isRunning())
+
+        if self.was_grabbing:
+            self.camera.stop_grabbing()
+            QThread.msleep(100)
+
+        if not self.camera.camera.IsGrabbing():
+            self.camera.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+
+    def _restore_state(self):
+        self.camera.camera.StopGrabbing()
+        if self.was_grabbing:
+            QTimer.singleShot(100, self.camera.start_grabbing)
+
+    def _record_single(self):
+        grab_result = None
+        try:
+            save_path = self.camera.config['save_path']
+            os.makedirs(save_path, exist_ok=True)
+
+            save_fmt = self.camera.config['save_format'].lower()
+            frame_rate = float(self.camera.config['frame_rate'])
+            timeout = int(1000 / frame_rate)
+
+            grab_result = self.camera.camera.RetrieveResult(timeout, pylon.TimeoutHandling_Return)
+            if grab_result.GrabSucceeded():
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                filename = os.path.join(save_path, f"{timestamp}.{save_fmt}")
+                self.camera._save_image(grab_result, filename, save_fmt)
+
+        except Exception as e:
+            self.error.emit(f"单张拍摄失败: {str(e)}")
+        finally:
+            if grab_result:
+                grab_result.Release()
+
+    def _record_batch(self):
+        save_path = self.camera.config['save_path']
+        save_fmt = self.camera.config['save_format']
+        num_to_save = self.camera.config['num_to_save']
+        frame_rate = float(self.camera.config['frame_rate'])
+        timeout = max(50, int(1000 / frame_rate))
+
+        count = 0
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        while count < num_to_save and not self._stop_flag:
+            grab_result = None
+            try:
+                grab_result = self.camera.camera.RetrieveResult(timeout, pylon.TimeoutHandling_Return)
+                if grab_result.GrabSucceeded():
+                    filename = f"{save_path}/{timestamp}_{count + 1:04d}.{save_fmt}"
+                    self.camera._save_image(grab_result, filename, save_fmt)
+                    count += 1
+                    self.progress.emit(count, num_to_save)
+
+            except Exception as e:
+                self.error.emit(f"批量拍摄错误(第{count}张): {str(e)}")
+            finally:
+                if grab_result:
+                    grab_result.Release()
+            QThread.msleep(10)
+
+
+class Camera(QObject):
+    frame_ready = pyqtSignal(np.ndarray)
+    error_occurred = pyqtSignal(str)
+    recording_finished = pyqtSignal()
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.camera = None
+        self.image = pylon.PylonImage()
+        self.recording_thread = None
+        self.grab_thread = None
+
+        self.converter = pylon.ImageFormatConverter()
+        self.converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+        self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+    def initialize(self):
+        try:
+            if pylon is None:
+                raise RuntimeError("pypylon 未安装，相机功能不可用")
+
+            tlf = pylon.TlFactory.GetInstance()
+            devices = tlf.EnumerateDevices()
+            if not devices:
+                raise RuntimeError("未找到 Basler 相机")
+
+            self.camera = pylon.InstantCamera(tlf.CreateDevice(devices[0]))
+            self.camera.Open()
+
+            self.config['camera_name'] = self.camera.GetDeviceInfo().GetModelName()
+            self.config['sensor_size'] = f"{self.camera.Width.Max} x {self.camera.Height.Max}"
+            self.config['image_width'] = self.camera.Width.Max
+            self.config['image_height'] = self.camera.Height.Max
+
+            self._initialize_check_camera_type()
+            self._initialize_apply_config()
+            return True
+        except Exception as e:
+            self.error_occurred.emit(f"相机初始化失败：{e}")
+            return False
+
+    def _initialize_check_camera_type(self):
+        camera_name = self.config['camera_name']
+        self.config['enable_balance_white'] = False
+        self.config['enable_ultrashort_exposure'] = False
+
+        if camera_name.endswith('POL'):
+            self.config['camera_type'] = 'Polar'
+        else:
+            self.config['camera_type'] = 'Regular'
+
+        if camera_name.endswith('cLET') or camera_name.endswith('mLET'):
+            self.config['enable_ultrashort_exposure'] = True
+
+    def _initialize_apply_config(self):
+        c = self.config
+
+        self.camera.ExposureAuto.SetValue('Off')
+        if c.get('enable_ultrashort_exposure', False):
+            self.camera.ExposureTimeMode.SetValue('UltraShort')
+        self.camera.ExposureTime.SetValue(c['exposure_time'])
+
+        self.camera.GainAuto.SetValue('Off')
+        self.camera.Gain.SetValue(c['gain'])
+
+        if c.get('enable_balance_white', False):
+            self.camera.BalanceWhiteAuto.SetValue('Off')
+
+        self.camera.AcquisitionFrameRateEnable.SetValue(True)
+        self.camera.AcquisitionFrameRate.SetValue(c['frame_rate'])
+
+        self.camera.Width.SetValue(c['image_width'])
+        self.camera.Height.SetValue(c['image_height'])
+        self.camera.CenterX.SetValue(False)
+        self.camera.CenterY.SetValue(False)
+        self.camera.OffsetX.SetValue(0)
+        self.camera.OffsetY.SetValue(0)
+
+    def update_param(self, key, value):
+        self.config[key] = value
+        try:
+            if key == "exposure_time":
+                self.camera.ExposureTime.SetValue(int(value))
+            elif key == "frame_rate":
+                self.camera.AcquisitionFrameRate.SetValue(float(value))
+            elif key == "image_width":
+                self.camera.Width.SetValue(int(value))
+            elif key == "image_height":
+                self.camera.Height.SetValue(value)
+            elif key == "offset_x":
+                self.camera.OffsetX.SetValue(value)
+            elif key == "offset_y":
+                self.camera.OffsetY.SetValue(value)
+            elif key == 'center_x':
+                self.camera.CenterX.SetValue(value)
+            elif key == 'center_y':
+                self.camera.CenterY.SetValue(value)
+            elif key == "enable_ultrashort_exposure":
+                if value:
+                    self.camera.ExposureTimeMode.SetValue('UltraShort')
+                    self.camera.ExposureTime.SetValue(10)
+                else:
+                    self.camera.ExposureTimeMode.SetValue('UltraShort')
+                    self.camera.ExposureTime.SetValue(self.camera.ExposureTime.GetMin())
+            elif key == "enable_balance_white":
+                if value:
+                    self.camera.BalanceWhiteAuto.SetValue('On')
+                else:
+                    self.camera.BalanceWhiteAuto.SetValue('Off')
+
+        except Exception as e:
+            self.error_occurred.emit(f"更新相机参数失败：{key} -> {e}")
+
+    def start_grabbing(self):
+        if self.camera and not self.camera.IsGrabbing():
+            self.camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            if not self.grab_thread:
+                self.grab_thread = GrabThread(self)
+                self.grab_thread.frame_ready.connect(self._handle_frame)
+            self.grab_thread.start()
+
+    def stop_grabbing(self):
+        if self.grab_thread:
+            self.grab_thread.stop()
+        if self.camera and self.camera.IsGrabbing():
+            self.camera.StopGrabbing()
+
+    def grab_frame(self):
+        frame_rate = float(self.config['frame_rate'])
+        timeout = int(1000 / frame_rate)
+
+        if self.camera and self.camera.IsGrabbing():
+            grab_result = self.camera.RetrieveResult(timeout, pylon.TimeoutHandling_Return)
+            if grab_result and grab_result.GrabSucceeded():
+                try:
+                    image = self.converter.Convert(grab_result)
+                    frame = image.GetArray()
+                    return frame
+                finally:
+                    grab_result.Release()
+        return None
+
+    def _handle_frame(self, frame):
+        if frame is not None and frame.size > 0:
+            self.frame_ready.emit(frame)
+
+    def start_recording(self, record_mode):
+        if self.recording_thread and self.recording_thread.isRunning():
+            return False
+
+        self.recording_thread = RecordingThread(self, record_mode)
+        self.recording_thread.finished.connect(self._on_recording_finished)
+        self.recording_thread.error.connect(self.error_occurred)
+        self.recording_thread.start()
+        return True
+
+    def stop_recording(self):
+        if self.recording_thread and self.recording_thread.isRunning():
+            self.recording_thread.stop()
+            self.recording_thread.quit()
+            self.recording_thread.wait(1000)
+
+    def _on_recording_finished(self):
+        self.recording_thread = None
+        self.recording_finished.emit()
+
+    def _save_image(self, grab_result, filename, fmt):
+        self.image.AttachGrabResultBuffer(grab_result)
+        fmt = fmt.lower()
+        if fmt == 'jpg':
+            ipo = pylon.ImagePersistenceOptions()
+            quality = self.config.get('jpg_quality', 90)
+            quality = max(1, min(100, quality))
+            ipo.SetQuality(quality)
+            self.image.Save(pylon.ImageFileFormat_Jpeg, filename, ipo)
+        elif fmt == 'png':
+            self.image.Save(pylon.ImageFileFormat_Png, filename)
+        elif fmt == 'bmp':
+            self.image.Save(pylon.ImageFileFormat_Bmp, filename)
+        elif fmt in ['tif', 'tiff']:
+            self.image.Save(pylon.ImageFileFormat_Tiff, filename)
+        else:
+            self.image.Save(pylon.ImageFileFormat_Bmp, filename)
+
+    def close(self):
+        self.stop_grabbing()
+        if self.camera:
+            self.camera.Close()
+
+
+class CameraControlTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.camera_config = {
+            'exposure_time': 5000,
+            'gain': 1.0,
+            'frame_rate': 5,
+            'image_width': 1000,
+            'image_height': 1000,
+            'save_path': os.path.join(os.path.expanduser('~'), 'CameraImages'),
+            'save_format': 'png',
+            'num_to_save': 10,
+            'record_mode': 'single',
+            'jpg_quality': 90
+        }
+        self.camera = Camera(self.camera_config)
+        self.init_ui()
+        self.is_live_view_active = False
+        self.is_recording = False
+        self.current_frame = None
+
+        self.camera.recording_finished.connect(self.on_recording_finished)
+        self.camera.frame_ready.connect(self.display_image)
+        self.camera.error_occurred.connect(self.show_error)
+
+        self.image_label.setMouseTracking(True)
+        self.image_label.mouseMoveEvent = self.on_image_mouse_move
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # 主布局 - 水平布局
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(10)
+        layout.addLayout(main_layout)
+
+        # 左侧控制面板
+        control_panel = QWidget()
+        control_layout = QVBoxLayout(control_panel)
+        control_layout.setContentsMargins(5, 5, 5, 5)
+        control_layout.setSpacing(10)
+        main_layout.addWidget(control_panel, 1)
+
+        # 参数设置组
+        params_group = QGroupBox("相机参数设置")
+        params_layout = QGridLayout()
+        params_group.setLayout(params_layout)
+        params_layout.setVerticalSpacing(10)
+        control_layout.addWidget(params_group)
+
+        # 相机信息
+        row = 0
+        self.camera_name_label = QLabel("未连接")
+        self.camera_name_label.setStyleSheet("font-weight: bold;")
+        self.camera_name_label.setFixedHeight(15)
+        params_layout.addWidget(QLabel("相机型号:"), row, 0)
+        params_layout.addWidget(self.camera_name_label, row, 1, 1, 2)
+        row += 1
+
+        # 拍摄模式
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(['单张拍摄', '批量拍摄'])
+        self.mode_combo.currentTextChanged.connect(self.update_record_mode)
+        params_layout.addWidget(QLabel("拍摄模式:"), row, 0)
+        params_layout.addWidget(self.mode_combo, row, 1, 1, 2)
+        row += 1
+
+        # 曝光时间
+        exposure_layout = QHBoxLayout()
+        self.exposure_spin = QDoubleSpinBox()
+        self.exposure_spin.setRange(0.1, 10000)
+        self.exposure_spin.setValue(self.camera_config['exposure_time'])
+        self.exposure_spin.setSuffix(" μs")
+        exposure_layout.addWidget(self.exposure_spin)
+
+        self.apply_exposure_btn = QPushButton("应用")
+        self.apply_exposure_btn.clicked.connect(self.apply_exposure_time)
+        exposure_layout.addWidget(self.apply_exposure_btn)
+
+        params_layout.addWidget(QLabel("曝光时间:"), row, 0)
+        params_layout.addLayout(exposure_layout, row, 1, 1, 2)
+        row += 1
+
+        # 帧率设置
+        fps_layout = QHBoxLayout()
+        self.fps_spin = QDoubleSpinBox()
+        self.fps_spin.setRange(0.01, 1000)
+        self.fps_spin.setValue(self.camera_config['frame_rate'])
+        self.fps_spin.setSuffix(" FPS")
+        fps_layout.addWidget(self.fps_spin)
+
+        self.apply_fps_btn = QPushButton("应用")
+        self.apply_fps_btn.clicked.connect(self.apply_frame_rate)
+        fps_layout.addWidget(self.apply_fps_btn)
+
+        params_layout.addWidget(QLabel("拍摄帧率:"), row, 0)
+        params_layout.addLayout(fps_layout, row, 1, 1, 2)
+        row += 1
+
+        # 保存数量
+        self.num_save_spin = QSpinBox()
+        self.num_save_spin.setRange(1, 9999)
+        self.num_save_spin.setValue(self.camera_config['num_to_save'])
+        self.num_save_spin.valueChanged.connect(self.update_num_to_save)
+        params_layout.addWidget(QLabel("保存数量:"), row, 0)
+        params_layout.addWidget(self.num_save_spin, row, 1, 1, 2)
+        row += 1
+
+        # 路径选择
+        self.path_edit = QLineEdit(self.camera_config['save_path'])
+        self.path_edit.setReadOnly(True)
+        path_btn = QPushButton("选择路径")
+        path_btn.clicked.connect(self.select_save_path)
+        params_layout.addWidget(QLabel("保存路径:"), row, 0)
+        params_layout.addWidget(self.path_edit, row, 1)
+        params_layout.addWidget(path_btn, row, 2)
+        row += 1
+
+        # 添加弹簧
+        # control_layout.addStretch(1)
+
+        # 按钮组
+        btn_group = QGroupBox("操作控制")
+        btn_layout = QVBoxLayout()
+        btn_group.setLayout(btn_layout)
+        control_layout.addWidget(btn_group)
+
+        self.connect_btn = QPushButton("连接相机")
+        self.live_view_btn = QPushButton("实时浏览")
+        self.record_btn = QPushButton("开始记录")
+
+        self.connect_btn.setMinimumHeight(32)
+        self.live_view_btn.setMinimumHeight(32)
+        self.record_btn.setMinimumHeight(32)
+
+        btn_layout.addWidget(self.connect_btn)
+        btn_layout.addWidget(self.live_view_btn)
+        btn_layout.addWidget(self.record_btn)
+
+        self.connect_btn.clicked.connect(self.toggle_connection)
+        self.live_view_btn.clicked.connect(self.toggle_live_view)
+        self.record_btn.clicked.connect(self.toggle_recording)
+
+        # 初始禁用按钮
+        self.live_view_btn.setEnabled(False)
+        self.record_btn.setEnabled(False)
+        self.apply_exposure_btn.setEnabled(False)
+        self.apply_fps_btn.setEnabled(False)
+
+        # 右侧图像显示区域
+        display_panel = QWidget()
+        display_layout = QVBoxLayout(display_panel)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(display_panel, 2)
+
+        # 图像显示区域
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet("background-color: black;")
+        self.image_label.setMinimumSize(640, 480)
+        display_layout.addWidget(self.image_label)
+
+        # 状态标签，像素信息标签
+        self.status_label = QLabel("状态: 未连接")
+        # self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # self.status_label.setFixedHeight(15)
+        # display_layout.addWidget(self.status_label)
+
+        self.pixel_info_label = QLabel("光标位置: - , 像素值: -")
+        self.pixel_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pixel_info_label.setFixedHeight(15)
+        display_layout.addWidget(self.pixel_info_label)
+
+    def apply_exposure_time(self):
+        value = self.exposure_spin.value()
+        self.camera.update_param('exposure_time', value)
+        self.status_label.setText(f"曝光时间已设置为: {value} μs")
+
+    def apply_frame_rate(self):
+        value = self.fps_spin.value()
+        self.camera.update_param('frame_rate', value)
+        self.status_label.setText(f"帧率已设置为: {value} FPS")
+
+    def toggle_connection(self):
+        if not self.camera.camera or not self.camera.camera.IsOpen():
+            success = self.camera.initialize()
+            if success:
+                self.connect_btn.setText("断开相机")
+                self.live_view_btn.setEnabled(True)
+                self.record_btn.setEnabled(True)
+                camera_name = self.camera_config['camera_name']
+                self.camera_name_label.setText(f"{camera_name}")
+                self.status_label.setText(f"状态: 已连接 - {camera_name}")
+                self.apply_exposure_btn.setEnabled(True)
+                self.apply_fps_btn.setEnabled(True)
+            else:
+                self.camera_name_label.setText("连接失败")
+                self.status_label.setText("状态: 连接失败")
+        else:
+            self.stop_live_view()
+            self.camera.close()
+            self.connect_btn.setText("连接相机")
+            self.live_view_btn.setEnabled(False)
+            self.record_btn.setEnabled(False)
+            self.camera_name_label.setText("未连接")
+            self.status_label.setText("状态: 已断开")
+            self.apply_exposure_btn.setEnabled(False)
+            self.apply_fps_btn.setEnabled(False)
+
+    def toggle_live_view(self):
+        if self.is_live_view_active:
+            self.stop_live_view()
+            self.live_view_btn.setText("实时浏览")
+        else:
+            self.start_live_view()
+            self.live_view_btn.setText("停止浏览")
+
+    def toggle_recording(self):
+        if not self.is_recording:
+            if not os.path.exists(self.camera_config['save_path']):
+                try:
+                    os.makedirs(self.camera_config['save_path'], exist_ok=True)
+                except Exception as e:
+                    self.status_label.setText(f"创建保存目录失败: {str(e)}")
+                    return
+
+            self.record_btn.setText("停止记录")
+            self.is_recording = True
+            self.record_btn.setEnabled(False)
+            self.live_view_btn.setEnabled(False)
+
+            mode = "单张" if self.camera_config['record_mode'] == 'single' else "批量"
+            self.status_label.setText(f"状态: {mode}拍摄中 - {self.path_edit.text()}")
+
+            if not self.camera.start_recording(self.camera_config['record_mode']):
+                self.status_label.setText("已有录制在进行中")
+                return
+
+            if hasattr(self.camera.recording_thread, 'progress'):
+                self.camera.recording_thread.progress.connect(self.update_progress)
+
+            QTimer.singleShot(200, lambda: self.record_btn.setEnabled(True))
+        else:
+            self.record_btn.setEnabled(False)
+            self.camera.stop_recording()
+
+    def start_live_view(self):
+        if not self.camera.camera or not self.camera.camera.IsOpen():
+            self.status_label.setText("请先连接相机")
+            return
+        self.camera.start_grabbing()
+        self.live_view_btn.setText("停止浏览")
+        self.is_live_view_active = True
+
+    def stop_live_view(self):
+        self.camera.stop_grabbing()
+        self.live_view_btn.setText("实时浏览")
+        self.image_label.clear()
+        self.image_label.setText("实时显示已停止")
+        self.is_live_view_active = False
+
+    def on_image_mouse_move(self, event: QMouseEvent):
+        if self.current_frame is None:
+            return
+
+        pos = event.position()
+        x = int(pos.x())
+        y = int(pos.y())
+
+        label_width = self.image_label.width()
+        label_height = self.image_label.height()
+        pixmap = self.image_label.pixmap()
+
+        if not pixmap:
+            return
+
+        pixmap_width = pixmap.width()
+        pixmap_height = pixmap.height()
+
+        x_offset = (label_width - pixmap_width) // 2
+        y_offset = (label_height - pixmap_height) // 2
+
+        if (x < x_offset or x >= x_offset + pixmap_width or
+                y < y_offset or y >= y_offset + pixmap_height):
+            self.pixel_info_label.setText("光标位置: - , 像素值: -")
+            return
+
+        scale_x = self.current_frame.shape[1] / pixmap_width
+        scale_y = self.current_frame.shape[0] / pixmap_height
+
+        img_x = int((x - x_offset) * scale_x)
+        img_y = int((y - y_offset) * scale_y)
+
+        img_x = max(0, min(img_x, self.current_frame.shape[1] - 1))
+        img_y = max(0, min(img_y, self.current_frame.shape[0] - 1))
+
+        pixel_value = self.current_frame[img_y, img_x]
+
+        if len(pixel_value) == 1:
+            pixel_str = f"Gray: {pixel_value[0]}"
+        elif len(pixel_value) == 3:
+            pixel_str = f"B: {pixel_value[0]}, G: {pixel_value[1]}, R: {pixel_value[2]}"
+        else:
+            pixel_str = str(pixel_value)
+
+        self.pixel_info_label.setText(f"光标位置: ({img_x}, {img_y}), 像素值: {pixel_str}")
+
+    def display_image(self, img):
+        try:
+            if img is None or img.size == 0:
+                return
+
+            self.current_frame = img.copy()
+            img = np.ascontiguousarray(img)
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+
+            h, w = img.shape[:2]
+
+            if len(img.shape) == 2:
+                q_img = QImage(img.data, w, h, w, QImage.Format.Format_Grayscale8)
+            elif len(img.shape) == 3:
+                if img.shape[2] == 3:
+                    q_img = QImage(img.data, w, h, 3 * w, QImage.Format.Format_BGR888)
+                elif img.shape[2] == 4:
+                    q_img = QImage(img.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
+                else:
+                    return
+
+            # 计算缩放比例
+            target_height = self.image_label.height()
+            scale_ratio = target_height / h
+            target_width = int(w * scale_ratio)
+
+            pixmap = QPixmap.fromImage(q_img)
+            scaled_pixmap = pixmap.scaled(
+                target_width, target_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            print(f"显示图像错误: {str(e)}")
+
+    def update_record_mode(self, mode_text):
+        self.camera_config['record_mode'] = 'single' if mode_text == '单张拍摄' else 'multiple'
+
+    def update_num_to_save(self, value):
+        self.camera_config['num_to_save'] = value
+
+    def select_save_path(self):
+        initial_path = self.camera_config.get('save_path', '')
+        save_dir = QFileDialog.getExistingDirectory(self, "选择保存目录", initial_path)
+        if save_dir:
+            self.camera_config['save_path'] = save_dir
+            self.path_edit.setText(save_dir)
+
+    def on_recording_finished(self):
+        self.record_btn.setText("开始记录")
+        self.is_recording = False
+        self.record_btn.setEnabled(True)
+        self.live_view_btn.setEnabled(True)
+
+        save_path = self.camera_config['save_path']
+        if self.camera_config['record_mode'] == 'single':
+            self.status_label.setText(f"状态: 单张拍摄完成 - {save_path}")
+        else:
+            num_to_save = self.camera_config['num_to_save']
+            self.status_label.setText(f"状态: 多图拍摄完成 - {num_to_save}张 - {save_path}")
+
+    def update_progress(self, current, total):
+        self.status_label.setText(f"正在保存 {current} / {total} ... ...")
+
+    def show_error(self, message):
+        QMessageBox.critical(self, "相机错误", message)
+        self.stop_live_view()
 
 class AppSignals(QObject):
     connection_status = pyqtSignal(str, int, bool)
     operation_result = pyqtSignal(str, int, bool, str)
     status_update = pyqtSignal(int, dict)
 
+
 class SV113Controller:
     """SV113步进驱动器控制类 - 添加限位功能"""
+
     class StatusBits(Enum):
         RUN_STATUS = 8
         IN_POSITION = 12
@@ -123,7 +827,7 @@ class SV113Controller:
             target_position = current_position + 70000
 
             # 设置速度（50 RPM）
-            speed_units = int(50 * 100)
+            speed_units = int(200 * 100)
             self._write_dword(0x00D8, speed_units)
 
             # 设置加减速时间
@@ -219,6 +923,7 @@ class SV113Controller:
         result = self.client.write_registers(address=address, values=[lo_word, hi_word], slave=self.slave_id)
         if result.isError():
             raise IOError(f"写入寄存器失败")
+
 
 class ModbusWorker(threading.Thread):
     def __init__(self, command_queue, signals):
@@ -988,7 +1693,6 @@ class MotorControlWidget(QWidget):
         self.setup_connections()
         self.worker_ref = worker_ref  # 添加对worker的引用
 
-
     def init_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -1355,6 +2059,7 @@ class MotorControlWidget(QWidget):
             self.current_neg_limit_label.setText(f"当前负限位: {status['neg_limit']} 脉冲")
             self.current_pos_limit_label.setText(f"当前正限位: {status['pos_limit']} 脉冲")
 
+
 class IntegratedControlApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1366,7 +2071,11 @@ class IntegratedControlApp(QMainWindow):
         self.continuous_timer = None
         self.is_continuous_running = False
         self.current_scenario_index = 0
-        self.round_count = 1    # 记录运行了几轮，1~10循环
+        self.round_count = 1  # 记录运行了几轮，1~10循环
+        # 添加泵停止定时器
+        self.pump_stop_timer = QTimer(self)
+        self.pump_stop_timer.setSingleShot(True)
+        self.pump_stop_timer.timeout.connect(self.stop_pumps_after_timeout)
 
     def init_ui(self):
         self.setWindowTitle("泵阀集成控制系统")
@@ -1401,6 +2110,10 @@ class IntegratedControlApp(QMainWindow):
         motor_control = MotorControlWidget(self.command_queue, self.signals, self.worker)
         self.tab_widget.addTab(motor_control, "电机控制")
 
+        # 添加相机控制标签页
+        camera_tab = CameraControlTab()
+        self.tab_widget.addTab(camera_tab, "相机控制")
+
         # 系统工况控制页 - 重新设计布局
         scenario_widget = QWidget()
         scenario_layout = QVBoxLayout()
@@ -1411,7 +2124,7 @@ class IntegratedControlApp(QMainWindow):
         scenario_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         scenario_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scenario_title.setStyleSheet("color: #2E8B57; margin: 10px 0;")
-        scenario_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)        # 控制尺寸，不要占据完全空间
+        scenario_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)  # 控制尺寸，不要占据完全空间
         scenario_layout.addWidget(scenario_title)
 
         # 工况按钮网格
@@ -1534,11 +2247,18 @@ class IntegratedControlApp(QMainWindow):
         self.interval2_spin.setValue(15)
         interval_layout.addWidget(self.interval2_spin, 2, 1)
 
-        interval_layout.addWidget(QLabel("工况3后间隔(秒):"), 3, 0)
+        # 新增：工况2泵运行时间设置
+        interval_layout.addWidget(QLabel("工况2泵运行时间(秒):"), 3, 0)
+        self.scenario2_pump_duration_spin = QSpinBox()
+        self.scenario2_pump_duration_spin.setRange(1, 600)
+        self.scenario2_pump_duration_spin.setValue(60)  # 默认60秒
+        interval_layout.addWidget(self.scenario2_pump_duration_spin, 3, 1)
+
+        interval_layout.addWidget(QLabel("工况3后间隔(秒):"), 4, 0)
         self.interval3_spin = QSpinBox()
         self.interval3_spin.setRange(1, 600)
         self.interval3_spin.setValue(20)
-        interval_layout.addWidget(self.interval3_spin, 3, 1)
+        interval_layout.addWidget(self.interval3_spin, 4, 1)
 
         continuous_layout.addLayout(interval_layout)
 
@@ -1649,12 +2369,12 @@ class IntegratedControlApp(QMainWindow):
         scenarios = {
             0: {  # 初始化工况
                 'name': "初始化电机",
-                'description': "回零，设置上下限10000~60000，向下点动，位置到达10000时调整上下限10000~30000",
+                'description': "回零，设置上下限10000~60000，向下点动，位置到达10000时调整上下限10000~25000",
                 'valves': [],  # 阀门不需要操作
                 'pumps': [],  # 泵不需要操作
                 'motor': [
                     {'func': 'homing'},  # 电机回零
-                    {'func': 'set_limits', 'args': (10000, 30000)},  # 设置初始限位
+                    {'func': 'set_limits', 'args': (10000, 25000)},  # 设置初始限位
                     {'func': 'jog', 'args': (1, 50)},  # 向下点动
                 ]
             },
@@ -1681,7 +2401,7 @@ class IntegratedControlApp(QMainWindow):
                 'motor': [
                     # {'func': 'homing'},  # 电机回零
                     # {'func': 'set_limits', 'args': (30000, 60000)},  # 设置限位
-                    {'func': 'jog', 'args': (1, 50)},  # 点动下降直到负限位
+                    {'func': 'jog', 'args': (0, 50)},  # 点动下降直到负限位
                 ]
             },
 
@@ -1705,7 +2425,8 @@ class IntegratedControlApp(QMainWindow):
                 ],
                 'pumps': [(0, False, 5), (1, True, 600)],
                 'timers': [
-                    (60, {'device_type': 'pump', 'device_idx': 0, 'func': 'stop_pump'}),    # todo 这部分定时有点疑问，工况内部还需要定时吗？是否应该切换工况时定时？
+                    (60, {'device_type': 'pump', 'device_idx': 0, 'func': 'stop_pump'}),
+                    # todo 这部分定时有点疑问，工况内部还需要定时吗？是否应该切换工况时定时？
                     (60, {'device_type': 'pump', 'device_idx': 1, 'func': 'stop_pump'})
                 ],
                 'motor': [
@@ -1759,6 +2480,17 @@ class IntegratedControlApp(QMainWindow):
                 ]
             }
         }
+
+        # 在浆液路清洗工况中添加泵的定时停止
+        if scenario_id == 2:  # 浆液路清洗工况
+            # 获取设置的泵运行时间（秒）
+            pump_duration = self.scenario2_pump_duration_spin.value()
+
+            # 设置定时器在指定时间后停止泵
+            self.pump_stop_timer.start(pump_duration * 1000)  # 转换为毫秒
+
+            timestamp = time.strftime("%H:%M:%S")
+            self.log_text.append(f"<font color='blue'>[{timestamp}] 已设置泵将在{pump_duration}秒后自动停止</font>")
 
         if scenario_id not in scenarios:
             return
@@ -1857,7 +2589,7 @@ class IntegratedControlApp(QMainWindow):
                         position = self.worker.motors[0].get_position()
 
                         # 检查是否达到目标位置
-                        if position >= 60000:
+                        if position >= 65000:
                             execute_jog(scenario['motor'])
                             break
 
@@ -1880,6 +2612,29 @@ class IntegratedControlApp(QMainWindow):
                     f"<font color='blue'>[{timestamp}] 等待电机位置达到60000...</font>")
             else:
                 execute_jog(scenario['motor'])
+
+    def stop_pumps_after_timeout(self):
+        """在设定时间后停止所有泵"""
+        pump_duration = self.scenario2_pump_duration_spin.value()
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.append(f"<font color='blue'>[{timestamp}] {pump_duration}秒计时结束，正在停止所有泵</font>")
+
+        # 停止泵1
+        self.command_queue.put({
+            'device_type': 'pump',
+            'device_idx': 0,
+            'func': 'stop_pump'
+        })
+
+        # 停止泵2
+        self.command_queue.put({
+            'device_type': 'pump',
+            'device_idx': 1,
+            'func': 'stop_pump'
+        })
+
+        # 更新日志
+        self.log_text.append(f"<font color='green'>[{timestamp}] 所有泵已停止</font>")
 
     def start_continuous_run(self):
         """开始连续循环运行工况1→2→3→1→..."""
@@ -1941,7 +2696,7 @@ class IntegratedControlApp(QMainWindow):
         if self.current_scenario_index == 3 and self.round_count < 10:
             self.current_scenario_index = 1
             self.round_count += 1
-        elif self.current_scenario_index == 3 and self.round_count >= 10:   # 运行10轮后，进行一次初始化
+        elif self.current_scenario_index == 3 and self.round_count >= 10:  # 运行10轮后，进行一次初始化
             self.current_scenario_index = 0
             self.round_count = 1
         else:
