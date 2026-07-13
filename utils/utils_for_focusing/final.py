@@ -101,6 +101,7 @@ def rcf_predict(model, predict_loader, save_dir='', device='cuda'):
     max_concentration = -np.inf
     best_focus_image = None
     best_focus_name = None
+    best_index = None
 
     # for idx, (image, image_origin) in enumerate(predict_loader):
     for idx in range(predict_loader.length):
@@ -143,6 +144,7 @@ def rcf_predict(model, predict_loader, save_dir='', device='cuda'):
         if concentration > max_concentration:
             max_concentration = concentration
             best_focus_image = image_origin
+            best_index = idx
         # ed0 = time.time()
         # print('else', ed0 - st0)
         # # debug用，查看原图及其对应的预测结果
@@ -157,16 +159,17 @@ def rcf_predict(model, predict_loader, save_dir='', device='cuda'):
         # print("Running test [%d/%d]" % (idx + 1, len(predict_loader)))
         # print("Running test [%d/%d]" % (idx + 1, predict_loader.length))
 
-    return best_focus_image, best_focus_name
+    return best_focus_image, best_index
 
 
 def rcf_predict_V1(model, predict_loader, save_dir='', device='cuda'):
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = False
 
     model.eval()
     concentrations = []
     best_focus_image = None
     best_focus_name = None
+    best_index = None
     max_concentration = -np.inf
 
     # 批量处理所有图像
@@ -182,7 +185,7 @@ def rcf_predict_V1(model, predict_loader, save_dir='', device='cuda'):
             results = model(images)
 
         ed = time.time()
-        print("loading time:", ed - st)
+        print("predict time:", ed - st)
         # g = torch.cuda.CUDAGraph()
         # with torch.cuda.graph(g):
         #     results = model(images)
@@ -209,8 +212,12 @@ def rcf_predict_V1(model, predict_loader, save_dir='', device='cuda'):
                 max_concentration = concentration
                 # best_focus_image = images_origin[i].cpu().numpy()  # 使用原始图像
                 best_focus_image = images_origin[i] # 使用原始图像
+                best_index = i
 
-    return best_focus_image, best_focus_name
+        ed = time.time()
+        print("predict time1:", ed - st)
+
+    return best_focus_image, best_index
 
 
 def rcf_predict_V2(model,

@@ -108,14 +108,14 @@ class HoloConfig:
     })
 
     reconstruction:         Dict[str, Any] = field(default_factory=lambda: {
-        'method'        : 'Angular_CPU',
+        'method'        : 'Angular_GPU',
         'method_list'   : ['Angular_CPU', 'Angular_GPU', 'Fresnel', 'AI'],
         'model_path'    : 'E:\Projects\HoloLabV1\models/reconstruction',
         'model_name'    : 'model_name',
         'cpu_num'       : 10,
         'gpu_num'       : 1,
-        'z_start'       : 60.0,     # 实际需要 * unit_mm
-        'z_end'         : 85.0,     # 实际需要 * unit_mm
+        'z_start'       : 40.0,     # 实际需要 * unit_mm
+        'z_end'         : 100.0,     # 实际需要 * unit_mm
         'z_step'        : 1.00     # 实际需要 * unit_mm
     })
 

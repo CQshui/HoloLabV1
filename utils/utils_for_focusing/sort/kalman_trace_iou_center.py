@@ -377,6 +377,8 @@ class Kalman_tracker:
         particle_ori_info = {}  # dict, 记录颗粒位置的极值, 确保所有截面的颗粒都被完整记录
         image_files = None
 
+        st_track = time.time()
+
         # 两种输入情况，一种是输入文件夹路径，另一种是直接输入stack（w, h, num)，格式为数组，需要转为Image
         if self.image_folder is not None:
             # 获取排序后的图像文件列表
@@ -388,6 +390,10 @@ class Kalman_tracker:
         else:
             image_num = self.image_stack.shape[-1]
 
+        ed_track1 = time.time()
+        print('track1', ed_track1 - st_track)
+
+        detect_image_np_time = 0
         for idx in range(image_num):
             if image_files is not None:
                 print('Start [{}/{}]'.format(idx + 1, image_num))
@@ -396,16 +402,17 @@ class Kalman_tracker:
             else:
                 frame = self.image_stack[:, :, idx]  # 提取第 idx 个图像数据
 
-            # st1 = time.time()
+                # st1 = time.time()
             # YOLOv8检测
             # try:
-                result_img, results = self.yolo_model.detect_image_np(frame, crop=False, count=False, draw=False, device=self.device)
+                result_img, results, inference_time = self.yolo_model.detect_image_np(frame, crop=False, count=False, draw=False, device=self.device)
                 # result_img_pil = Image.fromarray(frame, mode='L')
                 # imshow_np(frame, '检测结果')
             # except:
             #     results = ([], [], [])
-            # ed1 = time.time()
-            # print('get_stacks', ed1 - st1)
+            #     ed1 = time.time()
+            #     delta_time = ed1 - st1
+                detect_image_np_time += inference_time
 
             boxes_xywh, confidences, labels = results
 
@@ -455,6 +462,11 @@ class Kalman_tracker:
                         particle_info[track_id] = [left_padded, right_padded, top_padded, bottom_padded]
                         particle_ori_info[track_id] = [left_ori, right_ori, top_ori, bottom_ori]
 
+        print('detect_image_np_time', detect_image_np_time)
+
+        ed_track2 = time.time()
+        print('track2', ed_track2 - st_track)
+
         # for info in particle_info:
         for i, info in particle_info.items():  # dict
             stack = []
@@ -496,6 +508,9 @@ class Kalman_tracker:
 
             # except Exception as e:
             #     print('Error,', e)
+
+        ed_track3 = time.time()
+        print('track3', ed_track3 - st_track)
 
         if get_position:
             return stack_lst, stack_ori_lst, image_files, position_lst

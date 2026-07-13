@@ -93,6 +93,8 @@ class Hologram_using_Key_Config:
 
         '''聚焦图、子图、深度图_______________________________________'''
         self.focusing               = np.zeros(self.hologram.shape)
+        self.focusing_z             = []    # 每个颗粒的聚焦深度位置
+        self.focusing_xy            = []    # 每个颗粒的位置框坐标，嵌套列表[[x1,y1,x2,y2],.
         self.focusing_each          = []
         self.focusing_depth_map     = np.zeros(self.hologram.shape)
 
@@ -285,9 +287,12 @@ class Hologram:
             'Z 1': self._make_empty_image() // 2
         }
         self.reconstruction_each    = [] # 每个颗粒的重建子图列表，可以是一个list
+        self.reconstruction_z       = []    # todo 新增方便提取z
 
         '''聚焦图、子图、深度图_______________________________________'''
         self.focusing               = self._make_empty_image()
+        self.focusing_z             = []    # 每个颗粒的聚焦深度位置
+        self.focusing_xy            = []    # 每个颗粒的位置框坐标，嵌套列表[[x1,y1,x2,y2],.
         self.focusing_each          = {}
         self.focusing_depth_map     = self._make_empty_image()
 

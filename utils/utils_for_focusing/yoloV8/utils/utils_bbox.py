@@ -45,7 +45,7 @@ class DecodeBox():
         self.num_classes    = num_classes
         self.bbox_attrs     = 4 + num_classes
         self.input_shape    = input_shape
-        
+
     def decode_box(self, inputs):
         # dbox  batch_size, 4, 8400
         # cls   batch_size, 20, 8400
@@ -109,7 +109,7 @@ class DecodeBox():
             #   利用置信度进行第一轮筛选
             #----------------------------------------------------------#
             conf_mask = (class_conf[:, 0] >= conf_thres).squeeze()
-            
+
             #----------------------------------------------------------#
             #   根据置信度进行预测结果的筛选
             #----------------------------------------------------------#
@@ -148,7 +148,7 @@ class DecodeBox():
                     nms_thres
                 )
                 max_detections = detections_class[keep]
-                
+
                 # # 按照存在物体的置信度排序
                 # _, conf_sort_index = torch.sort(detections_class[:, 4]*detections_class[:, 5], descending=True)
                 # detections_class = detections_class[conf_sort_index]
@@ -163,10 +163,10 @@ class DecodeBox():
                 #     detections_class = detections_class[1:][ious < nms_thres]
                 # # 堆叠
                 # max_detections = torch.cat(max_detections).data
-                
+
                 # Add max detections to outputs
                 output[i] = max_detections if output[i] is None else torch.cat((output[i], max_detections))
-            
+
             if output[i] is not None:
                 output[i]           = output[i].cpu().numpy()
                 box_xy, box_wh      = (output[i][:, 0:2] + output[i][:, 2:4])/2, output[i][:, 2:4] - output[i][:, 0:2]

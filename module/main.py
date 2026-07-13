@@ -3020,7 +3020,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"[Parameter Changed] {key} = {value}")
 
     # 按钮操作 | 计算完毕之后，Tab页面图像更新
-    def update_image__(self, operation_name: str, image: np.ndarray | dict, status: str):
+    def update_image__(self, operation_name: str, image, status: str):
         ''''''
         '''
         过来的 image 变量有三种情况
@@ -3120,7 +3120,7 @@ class MainWindow(QMainWindow):
         2、空字典{}  ：表示开始处理，会启动计时
         3、非空字典，ndarray：表示处理完成，显示图像，如果计时启动过，则停止计时 | 如果计时没启动过，则不计时
     '''
-    def update_image(self, operation_name: str, image: np.ndarray | dict, status: str):
+    def update_image(self, operation_name: str, image, status: str):
         ''''''
         '''Case 1. 多张图像'''
         if operation_name == "Multi Processing":
@@ -3145,7 +3145,7 @@ class MainWindow(QMainWindow):
         msg_html = f'<span style="color:{color};">[Operation] {status}</span>'  # #FF00FF, #00C400
         self.statusBar().showMessage(status)
         self.log_output.append(msg_html)
-    def _update_image_viewer(self, operation_name: str, image_data: np.ndarray | dict):
+    def _update_image_viewer(self, operation_name: str, image_data):
         """根据 operation_name 更新对应的图像展示区域"""
 
         if operation_name == "Origin":

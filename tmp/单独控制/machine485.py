@@ -1,3 +1,7 @@
+"""
+单独的电机控制
+极限脉冲位置为 -2500 ~ 60000
+"""
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
@@ -9,9 +13,6 @@ from enum import Enum, IntEnum
 import serial.tools.list_ports
 import time
 
-"""
-极限脉冲位置为 -2500 ~ 60000
-"""
 
 class SV113Controller:
     """SV113步进驱动器控制类"""

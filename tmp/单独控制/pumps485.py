@@ -1,3 +1,6 @@
+"""
+单独的泵控程序
+"""
 import sys
 import threading
 import queue

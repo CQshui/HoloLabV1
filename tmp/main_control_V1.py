@@ -1,3 +1,6 @@
+"""
+V1: 泵阀电机
+"""
 import sys
 import threading
 import queue

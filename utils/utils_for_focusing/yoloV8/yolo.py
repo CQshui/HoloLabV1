@@ -277,6 +277,8 @@ class YOLO(object):
         返回：out_img (H×W×3 uint8), (boxes_xywh, scores, labels)
         """
         # --- 1. 原始数据直接送 GPU (零拷贝) ---
+        st = time.time()
+
         # 保持原始数据格式直接送 GPU，最小化 CPU 处理
         img_t = torch.as_tensor(image_np, device=device)  # [H,W,C] 或 [H,W]
 
@@ -317,7 +319,9 @@ class YOLO(object):
         # --- 3. 模型推理（GPU） ---  todo 第一次预测似乎会耗时较长
         with torch.no_grad():
             preds = self.net(img_t)
+
             preds = self.bbox_util.decode_box(preds)
+
             results = self.bbox_util.non_max_suppression(
                 preds, self.class_names.__len__(),
                 self.input_shape, np.array([H0, W0]),
@@ -325,6 +329,9 @@ class YOLO(object):
                 conf_thres=self.confidence,
                 nms_thres=self.nms_iou
             )
+
+        # ed = time.time()
+        # delta_time = ed - st
 
         if results[0] is None:  # todo, 当没有识别出物体时，会返回整张图，这不合理
             return image_np, (np.zeros((0, 4)), np.zeros(0), np.zeros(0))
@@ -371,8 +378,9 @@ class YOLO(object):
                             (x1, max(y1 - 5, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             color, 1, cv2.LINE_AA)
-
-        return image_np, (boxes_xywh, scores, labels)
+        ed = time.time()
+        delta_time = ed - st
+        return image_np, (boxes_xywh, scores, labels), delta_time
 
     def get_FPS(self, image, test_interval):
         image_shape = np.array(np.shape(image)[0:2])

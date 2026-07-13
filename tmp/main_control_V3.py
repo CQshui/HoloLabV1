@@ -1,6 +1,3 @@
-"""
-V2: 泵阀电机相机
-"""
 import os
 import sys
 import threading
@@ -15,13 +12,40 @@ import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QLabel, QPushButton, QComboBox, QSpinBox,
                              QDoubleSpinBox, QTextEdit, QMessageBox, QTabWidget, QFrame,
-                             QGridLayout, QSizePolicy, QFileDialog, QLineEdit)
+                             QGridLayout, QSizePolicy, QFileDialog, QLineEdit, QDialogButtonBox, QDialog, QCheckBox)
 
 from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt, QThread
 from PyQt6.QtGui import QFont, QColor, QImage, QMouseEvent, QPixmap
 from pymodbus.client import ModbusSerialClient as ModbusClient
 from pymodbus.exceptions import ModbusException
 from pypylon import pylon
+
+
+class CameraSelectionDialog(QDialog):
+    def __init__(self, cameras, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择相机")
+        self.setModal(True)
+        self.selected_camera = None
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("检测到以下相机，请选择一个进行连接:"))
+
+        self.camera_combo = QComboBox()
+        for camera in cameras:
+            self.camera_combo.addItem(f"{camera.GetModelName()} - {camera.GetSerialNumber()}", camera)
+        layout.addWidget(self.camera_combo)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def get_selected_camera(self):
+        if self.exec() == QDialog.DialogCode.Accepted:
+            return self.camera_combo.currentData()
+        return None
 
 
 class GrabThread(QThread):
@@ -126,6 +150,8 @@ class RecordingThread(QThread):
 
     def _record_batch(self):
         save_path = self.camera.config['save_path']
+        os.makedirs(save_path, exist_ok=True)
+
         save_fmt = self.camera.config['save_format']
         num_to_save = self.camera.config['num_to_save']
         frame_rate = float(self.camera.config['frame_rate'])
@@ -164,25 +190,43 @@ class Camera(QObject):
         self.image = pylon.PylonImage()
         self.recording_thread = None
         self.grab_thread = None
+        self.infinite_batch_timer = QTimer()  # 添加定时器
+        self.infinite_batch_timer.timeout.connect(self._infinite_batch_cycle)
 
         self.converter = pylon.ImageFormatConverter()
         self.converter.OutputPixelFormat = pylon.PixelType_BGR8packed
         self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 
-    def initialize(self):
+        self.infinite_batch = False
+        self.use_timing_params = False  # 是否使用时间参数（新增）
+        self.infinite_shoot_time = 10  # 拍摄时间（秒）
+        self.infinite_interval_time = 5  # 间断时间（秒）
+        self.infinite_current_state = 'idle'  # 当前状态：idle, shooting, waiting
+
+    def initialize(self, camera_device=None):
         try:
             if pylon is None:
                 raise RuntimeError("pypylon 未安装，相机功能不可用")
 
             tlf = pylon.TlFactory.GetInstance()
-            devices = tlf.EnumerateDevices()
-            if not devices:
-                raise RuntimeError("未找到 Basler 相机")
 
-            self.camera = pylon.InstantCamera(tlf.CreateDevice(devices[0]))
+            # 如果没有指定相机设备，则弹出选择对话框
+            if camera_device is None:
+                devices = tlf.EnumerateDevices()
+                if not devices:
+                    raise RuntimeError("未找到 Basler 相机")
+
+                # 创建选择对话框
+                dialog = CameraSelectionDialog(devices)
+                camera_device = dialog.get_selected_camera()
+                if camera_device is None:
+                    return False  # 用户取消了选择
+
+            self.camera = pylon.InstantCamera(tlf.CreateDevice(camera_device))
             self.camera.Open()
 
             self.config['camera_name'] = self.camera.GetDeviceInfo().GetModelName()
+            self.config['camera_serial'] = self.camera.GetDeviceInfo().GetSerialNumber()
             self.config['sensor_size'] = f"{self.camera.Width.Max} x {self.camera.Height.Max}"
             self.config['image_width'] = self.camera.Width.Max
             self.config['image_height'] = self.camera.Height.Max
@@ -315,6 +359,63 @@ class Camera(QObject):
             self.recording_thread.quit()
             self.recording_thread.wait(1000)
 
+    def _start_infinite_shooting(self):
+        """开始无限拍摄周期"""
+        if not self.infinite_batch:
+            return
+
+        # 计算本次拍摄的张数
+        fps = float(self.config['frame_rate'])
+        num_to_shoot = int(self.infinite_shoot_time * fps)
+
+        if num_to_shoot <= 0:
+            num_to_shoot = 1
+
+        # 更新配置并开始拍摄
+        self.update_param('num_to_save', num_to_shoot)
+        ok = self.start_recording('multiple')
+
+        if ok:
+            # 设置定时器，在拍摄完成后切换到等待状态
+            estimated_shoot_time = num_to_shoot / fps + 2  # 加2秒缓冲
+            self.infinite_batch_timer.start(int(estimated_shoot_time * 1000))
+        else:
+            # 如果启动失败，稍后重试
+            self.infinite_batch_timer.start(1000)
+
+    def update_infinite_params(self, enabled=None, shoot_time=None, interval_time=None):
+        """更新无限拍摄参数"""
+        if enabled is not None:
+            self.infinite_batch_enabled = enabled
+        if shoot_time is not None:
+            self.infinite_shoot_time = shoot_time
+        if interval_time is not None:
+            self.infinite_interval_time = interval_time
+
+        # 更新配置字典
+        self.config['infinite_enabled'] = self.infinite_batch_enabled
+        self.config['infinite_shoot_time'] = self.infinite_shoot_time
+        self.config['infinite_interval_time'] = self.infinite_interval_time
+
+    def stop_infinite_batch(self):
+        """停止无限批量"""
+        self.infinite_batch = False
+        self.infinite_current_state = 'idle'
+        self.infinite_batch_timer.stop()
+        if self.recording_thread:
+            self.recording_thread.stop()
+
+    def _infinite_loop(self):
+        """内部：拍完一张后如果标志仍为 True，则继续拍下一张"""
+        if not self.infinite_batch:
+            return
+        # 每次只拍 1 张，但不停循环
+        self.update_param('num_to_save', 1)
+        ok = self.start_recording('multiple')
+        if ok:
+            # 当 RecordingThread 结束后自动触发下一次
+            self.recording_thread.finished.connect(self._infinite_loop)
+
     def _on_recording_finished(self):
         self.recording_thread = None
         self.recording_finished.emit()
@@ -337,26 +438,101 @@ class Camera(QObject):
         else:
             self.image.Save(pylon.ImageFileFormat_Bmp, filename)
 
+    def start_infinite_batch(self, use_timing_params=False):
+        """无限批量拍摄入口"""
+        if self.recording_thread and self.recording_thread.isRunning():
+            return False
+
+        self.infinite_batch = True
+        self.infinite_current_state = 'shooting'
+
+        if self.use_timing_params or use_timing_params:  # 如果使用时间参数
+            self._start_infinite_shooting_with_timing()
+        else:  # 如果不使用时间参数，使用原来的单张循环方式
+            self._infinite_loop()
+
+        return True
+
+    def _start_infinite_shooting_with_timing(self):
+        """使用时间参数的无限拍摄周期"""
+        if not self.infinite_batch:
+            return
+
+        # 计算本次拍摄的张数
+        fps = float(self.config['frame_rate'])
+        num_to_shoot = int(self.infinite_shoot_time * fps)
+
+        if num_to_shoot <= 0:
+            num_to_shoot = 1
+
+        # 更新配置并开始拍摄
+        self.update_param('num_to_save', num_to_shoot)
+        ok = self.start_recording('multiple')
+
+        if ok:
+            # 设置定时器，在拍摄完成后切换到等待状态
+            estimated_shoot_time = num_to_shoot / fps + 2  # 加2秒缓冲
+            self.infinite_batch_timer.start(int(estimated_shoot_time * 1000))
+        else:
+            # 如果启动失败，稍后重试
+            self.infinite_batch_timer.start(1000)
+
+    def _infinite_batch_cycle(self):
+        """无限批量拍摄周期控制（使用时间参数时）"""
+        self.infinite_batch_timer.stop()
+
+        if not self.infinite_batch:
+            return
+
+        if self.infinite_current_state == 'shooting':
+            # 拍摄完成，切换到等待状态
+            self.infinite_current_state = 'waiting'
+            wait_time = self.infinite_interval_time * 1000  # 转换为毫秒
+            self.infinite_batch_timer.start(wait_time)
+
+        elif self.infinite_current_state == 'waiting':
+            # 等待完成，重新开始拍摄
+            self.infinite_current_state = 'shooting'
+            self._start_infinite_shooting_with_timing()
+
+    def update_timing_params(self, use_timing=None, shoot_time=None, interval_time=None):
+        """更新时间参数（修改方法名和功能）"""
+        if use_timing is not None:
+            self.use_timing_params = use_timing
+        if shoot_time is not None:
+            self.infinite_shoot_time = shoot_time
+        if interval_time is not None:
+            self.infinite_interval_time = interval_time
+
+        # 更新配置字典
+        self.config['use_timing_params'] = self.use_timing_params  # 修改配置键名
+        self.config['infinite_shoot_time'] = self.infinite_shoot_time
+        self.config['infinite_interval_time'] = self.infinite_interval_time
+
     def close(self):
         self.stop_grabbing()
         if self.camera:
             self.camera.Close()
 
 
-class CameraControlTab(QWidget):
-    def __init__(self, parent=None):
+# 相机控制标签页基类
+class CameraControlTabBase(QWidget):
+    def __init__(self, parent=None, default_save_path=""):
         super().__init__(parent)
         self.camera_config = {
             'exposure_time': 5000,
             'gain': 1.0,
-            'frame_rate': 5,
+            'frame_rate': 1,
             'image_width': 1000,
             'image_height': 1000,
-            'save_path': os.path.join(os.path.expanduser('~'), 'CameraImages'),
+            'save_path': default_save_path,
             'save_format': 'png',
             'num_to_save': 10,
             'record_mode': 'single',
-            'jpg_quality': 90
+            'jpg_quality': 90,
+            'use_timing_params': False,  # 修改：是否使用时间参数
+            'infinite_shoot_time': 10,  # 拍摄时间（秒）
+            'infinite_interval_time': 5  # 间断时间（秒）
         }
         self.camera = Camera(self.camera_config)
         self.init_ui()
@@ -404,6 +580,13 @@ class CameraControlTab(QWidget):
         params_layout.addWidget(self.camera_name_label, row, 1, 1, 2)
         row += 1
 
+        # 相机序列号
+        self.camera_serial_label = QLabel("")
+        self.camera_serial_label.setFixedHeight(15)
+        params_layout.addWidget(QLabel("序列号:"), row, 0)
+        params_layout.addWidget(self.camera_serial_label, row, 1, 1, 2)
+        row += 1
+
         # 拍摄模式
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(['单张拍摄', '批量拍摄'])
@@ -445,12 +628,20 @@ class CameraControlTab(QWidget):
         row += 1
 
         # 保存数量
-        self.num_save_spin = QSpinBox()
+        num_save_layout = QHBoxLayout()
+        self.num_save_spin = QDoubleSpinBox()
         self.num_save_spin.setRange(1, 9999)
         self.num_save_spin.setValue(self.camera_config['num_to_save'])
-        self.num_save_spin.valueChanged.connect(self.update_num_to_save)
+        self.num_save_spin.setSuffix(" 张")
+        num_save_layout.addWidget(self.num_save_spin)
+
+        # 新增"应用"按钮
+        self.apply_num_btn = QPushButton("应用")
+        self.apply_num_btn.clicked.connect(self.apply_num_to_save)
+        num_save_layout.addWidget(self.apply_num_btn)
+
         params_layout.addWidget(QLabel("保存数量:"), row, 0)
-        params_layout.addWidget(self.num_save_spin, row, 1, 1, 2)
+        params_layout.addLayout(num_save_layout, row, 1, 1, 2)
         row += 1
 
         # 路径选择
@@ -463,8 +654,42 @@ class CameraControlTab(QWidget):
         params_layout.addWidget(path_btn, row, 2)
         row += 1
 
-        # 添加弹簧
-        # control_layout.addStretch(1)
+        # 在按钮组之前添加无限批量参数设置
+        infinite_group = QGroupBox("无限批量拍摄参数")
+        infinite_layout = QGridLayout()
+        infinite_group.setLayout(infinite_layout)
+        control_layout.addWidget(infinite_group)
+
+        # 修改：启用时间参数复选框
+        self.use_timing_check = QCheckBox("启用拍摄时间和间隔时间")
+        self.use_timing_check.setChecked(self.camera_config['use_timing_params'])
+        self.use_timing_check.stateChanged.connect(self.update_use_timing)
+        infinite_layout.addWidget(self.use_timing_check, 0, 0, 1, 2)
+
+        # 拍摄时间
+        self.shoot_time_spin = QDoubleSpinBox()
+        self.shoot_time_spin.setRange(0.1, 3600)
+        self.shoot_time_spin.setValue(self.camera_config['infinite_shoot_time'])
+        self.shoot_time_spin.setSuffix(" 秒")
+        self.shoot_time_spin.valueChanged.connect(self.update_shoot_time)
+        infinite_layout.addWidget(QLabel("单次拍摄时间:"), 1, 0)
+        infinite_layout.addWidget(self.shoot_time_spin, 1, 1)
+
+        # 间断时间
+        self.interval_time_spin = QDoubleSpinBox()
+        self.interval_time_spin.setRange(0, 3600)
+        self.interval_time_spin.setValue(self.camera_config['infinite_interval_time'])
+        self.interval_time_spin.setSuffix(" 秒")
+        self.interval_time_spin.valueChanged.connect(self.update_interval_time)
+        infinite_layout.addWidget(QLabel("拍摄间隔时间:"), 2, 0)
+        infinite_layout.addWidget(self.interval_time_spin, 2, 1)
+
+        # 状态显示标签
+        self.infinite_status_label = QLabel("无限拍摄模式: 单张连续")
+        infinite_layout.addWidget(self.infinite_status_label, 3, 0, 1, 2)
+
+        # 更新控件启用状态
+        self.update_timing_controls_state()
 
         # 按钮组
         btn_group = QGroupBox("操作控制")
@@ -472,27 +697,34 @@ class CameraControlTab(QWidget):
         btn_group.setLayout(btn_layout)
         control_layout.addWidget(btn_group)
 
+        # 在 btn_layout 之前插入无限批量按钮
         self.connect_btn = QPushButton("连接相机")
         self.live_view_btn = QPushButton("实时浏览")
         self.record_btn = QPushButton("开始记录")
+        self.infinite_btn = QPushButton("开始无限批量")
 
         self.connect_btn.setMinimumHeight(32)
         self.live_view_btn.setMinimumHeight(32)
         self.record_btn.setMinimumHeight(32)
+        self.infinite_btn.setMinimumHeight(32)
 
         btn_layout.addWidget(self.connect_btn)
         btn_layout.addWidget(self.live_view_btn)
         btn_layout.addWidget(self.record_btn)
+        btn_layout.addWidget(self.infinite_btn)
 
         self.connect_btn.clicked.connect(self.toggle_connection)
         self.live_view_btn.clicked.connect(self.toggle_live_view)
         self.record_btn.clicked.connect(self.toggle_recording)
+        self.infinite_btn.clicked.connect(self.toggle_infinite_batch)
 
-        # 初始禁用按钮
+        # 设置初始可用性
         self.live_view_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.apply_exposure_btn.setEnabled(False)
         self.apply_fps_btn.setEnabled(False)
+        self.apply_num_btn.setEnabled(False)
+        self.infinite_btn.setEnabled(False)
 
         # 右侧图像显示区域
         display_panel = QWidget()
@@ -509,14 +741,17 @@ class CameraControlTab(QWidget):
 
         # 状态标签，像素信息标签
         self.status_label = QLabel("状态: 未连接")
-        # self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # self.status_label.setFixedHeight(15)
         # display_layout.addWidget(self.status_label)
 
         self.pixel_info_label = QLabel("光标位置: - , 像素值: -")
         self.pixel_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pixel_info_label.setFixedHeight(15)
         display_layout.addWidget(self.pixel_info_label)
+
+    def apply_num_to_save(self):
+        value = self.num_save_spin.value()
+        self.camera.update_param('num_to_save', value)
+        self.status_label.setText(f"保存数量已设置为: {value}")
 
     def apply_exposure_time(self):
         value = self.exposure_spin.value()
@@ -536,12 +771,18 @@ class CameraControlTab(QWidget):
                 self.live_view_btn.setEnabled(True)
                 self.record_btn.setEnabled(True)
                 camera_name = self.camera_config['camera_name']
+                camera_serial = self.camera_config.get('camera_serial', '未知')
                 self.camera_name_label.setText(f"{camera_name}")
+                self.camera_serial_label.setText(f"{camera_serial}")
                 self.status_label.setText(f"状态: 已连接 - {camera_name}")
                 self.apply_exposure_btn.setEnabled(True)
                 self.apply_fps_btn.setEnabled(True)
+                self.infinite_btn.setEnabled(True)  # ← 新增
+                self.apply_num_btn.setEnabled(True)
+
             else:
                 self.camera_name_label.setText("连接失败")
+                self.camera_serial_label.setText("")
                 self.status_label.setText("状态: 连接失败")
         else:
             self.stop_live_view()
@@ -550,9 +791,11 @@ class CameraControlTab(QWidget):
             self.live_view_btn.setEnabled(False)
             self.record_btn.setEnabled(False)
             self.camera_name_label.setText("未连接")
+            self.camera_serial_label.setText("")
             self.status_label.setText("状态: 已断开")
             self.apply_exposure_btn.setEnabled(False)
             self.apply_fps_btn.setEnabled(False)
+            self.infinite_btn.setEnabled(False)  # ← 新增
 
     def toggle_live_view(self):
         if self.is_live_view_active:
@@ -703,6 +946,10 @@ class CameraControlTab(QWidget):
             self.path_edit.setText(save_dir)
 
     def on_recording_finished(self):
+        # 无限批量模式下由 _infinite_loop 自动重启，这里不重置按钮文字
+        if getattr(self.camera, 'infinite_batch', False):
+            return
+
         self.record_btn.setText("开始记录")
         self.is_recording = False
         self.record_btn.setEnabled(True)
@@ -722,15 +969,93 @@ class CameraControlTab(QWidget):
         QMessageBox.critical(self, "相机错误", message)
         self.stop_live_view()
 
+    def update_timing_controls_state(self):
+        """更新时间参数控件的启用状态"""
+        enabled = self.use_timing_check.isChecked()
+        self.shoot_time_spin.setEnabled(enabled)
+        self.interval_time_spin.setEnabled(enabled)
+
+        # 更新状态标签
+        mode_text = "时间控制模式" if enabled else "单张连续模式"
+        self.infinite_status_label.setText(f"无限拍摄模式: {mode_text}")
+
+    def update_use_timing(self, state):
+        """更新是否使用时间参数"""
+        use_timing = state == Qt.CheckState.Checked.value
+        self.camera.update_timing_params(use_timing=use_timing)  # 修改方法调用
+        self.update_timing_controls_state()
+
+    def update_shoot_time(self, value):
+        """更新拍摄时间"""
+        self.camera.update_timing_params(shoot_time=value)  # 修改方法调用
+
+    def update_interval_time(self, value):
+        """更新间隔时间"""
+        self.camera.update_timing_params(interval_time=value)  # 修改方法调用
+
+    def toggle_infinite_batch(self):
+        # 删除启用检查，无限批量功能总是可用的
+        if self.camera.recording_thread and self.camera.recording_thread.isRunning():
+            # 正在录制 → 停止
+            self.camera.stop_infinite_batch()
+            self.infinite_btn.setText("开始无限批量")
+            self.infinite_btn.setChecked(False)
+            self.status_label.setText("状态: 无限批量已停止")
+
+            # 更新状态标签
+            if self.camera.use_timing_params:
+                self.infinite_status_label.setText("无限拍摄模式: 时间控制模式 (已停止)")
+            else:
+                self.infinite_status_label.setText("无限拍摄模式: 单张连续模式 (已停止)")
+
+        else:
+            # 未录制 → 开始
+            if not os.path.exists(self.camera_config['save_path']):
+                try:
+                    os.makedirs(self.camera_config['save_path'], exist_ok=True)
+                except Exception as e:
+                    self.status_label.setText(f"创建目录失败: {e}")
+                    return
+
+            if self.camera.start_infinite_batch():
+                self.infinite_btn.setText("停止无限批量")
+                self.infinite_btn.setChecked(True)
+
+                if self.camera.use_timing_params:
+                    # 时间控制模式
+                    fps = self.camera_config['frame_rate']
+                    shoot_time = self.camera_config['infinite_shoot_time']
+                    interval_time = self.camera_config['infinite_interval_time']
+                    total_per_cycle = int(fps * shoot_time)
+
+                    status_text = (f"状态: 无限批量拍摄中 - {total_per_cycle}张/次, "
+                                   f"拍摄{shoot_time}秒, 间隔{interval_time}秒")
+                    self.status_label.setText(status_text)
+                    self.infinite_status_label.setText("无限拍摄模式: 时间控制模式 (运行中)")
+                else:
+                    # 单张连续模式
+                    self.status_label.setText("状态: 无限批量拍摄中 - 单张连续模式")
+                    self.infinite_status_label.setText("无限拍摄模式: 单张连续模式 (运行中)")
+            else:
+                self.status_label.setText("状态: 启动无限批量失败")
+
+
+class CameraControlTab_A(CameraControlTabBase):
+    def __init__(self, parent=None):
+        super().__init__(parent, r'G:\CameraImage\CameraA')
+
+
+class CameraControlTab_B(CameraControlTabBase):
+    def __init__(self, parent=None):
+        super().__init__(parent, r'G:\CameraImage\CameraB')
+
 class AppSignals(QObject):
     connection_status = pyqtSignal(str, int, bool)
     operation_result = pyqtSignal(str, int, bool, str)
     status_update = pyqtSignal(int, dict)
 
-
 class SV113Controller:
     """SV113步进驱动器控制类 - 添加限位功能"""
-
     class StatusBits(Enum):
         RUN_STATUS = 8
         IN_POSITION = 12
@@ -830,7 +1155,7 @@ class SV113Controller:
             target_position = current_position + 70000
 
             # 设置速度（50 RPM）
-            speed_units = int(200 * 100)
+            speed_units = int(50 * 100)
             self._write_dword(0x00D8, speed_units)
 
             # 设置加减速时间
@@ -926,7 +1251,6 @@ class SV113Controller:
         result = self.client.write_registers(address=address, values=[lo_word, hi_word], slave=self.slave_id)
         if result.isError():
             raise IOError(f"写入寄存器失败")
-
 
 class ModbusWorker(threading.Thread):
     def __init__(self, command_queue, signals):
@@ -1298,7 +1622,6 @@ class ModbusWorker(threading.Thread):
         except Exception as e:
             print(f"电机状态获取失败: {e}")
 
-
 class SinglePumpControlWidget(QWidget):
     def __init__(self, pump_idx, command_queue, signals):
         super().__init__()
@@ -1494,7 +1817,6 @@ class SinglePumpControlWidget(QWidget):
         self.speed_label.setText(f"当前转速: {status['speed'] or '-'} RPM")
         self.max_speed_label.setText(f"最大转速: {status['max_speed'] or '-'} RPM")
 
-
 class ValveControlWidget(QWidget):
     def __init__(self, command_queue, signals):
         super().__init__()
@@ -1684,7 +2006,6 @@ class ValveControlWidget(QWidget):
         else:
             self.valve_status_label.setText(f"状态: {message}")
 
-
 # 创建电机控制界面类
 class MotorControlWidget(QWidget):
     def __init__(self, command_queue, signals, worker_ref):
@@ -1695,6 +2016,7 @@ class MotorControlWidget(QWidget):
         self.init_ui()
         self.setup_connections()
         self.worker_ref = worker_ref  # 添加对worker的引用
+
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -2062,7 +2384,6 @@ class MotorControlWidget(QWidget):
             self.current_neg_limit_label.setText(f"当前负限位: {status['neg_limit']} 脉冲")
             self.current_pos_limit_label.setText(f"当前正限位: {status['pos_limit']} 脉冲")
 
-
 class IntegratedControlApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2074,11 +2395,7 @@ class IntegratedControlApp(QMainWindow):
         self.continuous_timer = None
         self.is_continuous_running = False
         self.current_scenario_index = 0
-        self.round_count = 1  # 记录运行了几轮，1~10循环
-        # 添加泵停止定时器
-        self.pump_stop_timer = QTimer(self)
-        self.pump_stop_timer.setSingleShot(True)
-        self.pump_stop_timer.timeout.connect(self.stop_pumps_after_timeout)
+        self.round_count = 1    # 记录运行了几轮，1~10循环
 
     def init_ui(self):
         self.setWindowTitle("泵阀集成控制系统")
@@ -2114,8 +2431,16 @@ class IntegratedControlApp(QMainWindow):
         self.tab_widget.addTab(motor_control, "电机控制")
 
         # 添加相机控制标签页
-        camera_tab = CameraControlTab()
-        self.tab_widget.addTab(camera_tab, "相机控制")
+        # 相机
+        self.cameras = {}  # 保存两个相机实例
+        self.camera_threads = {}  # 保存线程引用
+        camera_tab_a = CameraControlTab_A()
+        camera_tab_b = CameraControlTab_B()
+        self.tab_widget.addTab(camera_tab_a, "相机 A 控制")
+        self.tab_widget.addTab(camera_tab_b, "相机 B 控制")
+        # 保存实例
+        self.cameras['A'] = camera_tab_a.camera
+        self.cameras['B'] = camera_tab_b.camera
 
         # 系统工况控制页 - 重新设计布局
         scenario_widget = QWidget()
@@ -2127,7 +2452,7 @@ class IntegratedControlApp(QMainWindow):
         scenario_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         scenario_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scenario_title.setStyleSheet("color: #2E8B57; margin: 10px 0;")
-        scenario_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)  # 控制尺寸，不要占据完全空间
+        scenario_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)        # 控制尺寸，不要占据完全空间
         scenario_layout.addWidget(scenario_title)
 
         # 工况按钮网格
@@ -2250,18 +2575,11 @@ class IntegratedControlApp(QMainWindow):
         self.interval2_spin.setValue(15)
         interval_layout.addWidget(self.interval2_spin, 2, 1)
 
-        # 新增：工况2泵运行时间设置
-        interval_layout.addWidget(QLabel("工况2泵运行时间(秒):"), 3, 0)
-        self.scenario2_pump_duration_spin = QSpinBox()
-        self.scenario2_pump_duration_spin.setRange(1, 600)
-        self.scenario2_pump_duration_spin.setValue(60)  # 默认60秒
-        interval_layout.addWidget(self.scenario2_pump_duration_spin, 3, 1)
-
-        interval_layout.addWidget(QLabel("工况3后间隔(秒):"), 4, 0)
+        interval_layout.addWidget(QLabel("工况3后间隔(秒):"), 3, 0)
         self.interval3_spin = QSpinBox()
         self.interval3_spin.setRange(1, 600)
         self.interval3_spin.setValue(20)
-        interval_layout.addWidget(self.interval3_spin, 4, 1)
+        interval_layout.addWidget(self.interval3_spin, 3, 1)
 
         continuous_layout.addLayout(interval_layout)
 
@@ -2372,12 +2690,12 @@ class IntegratedControlApp(QMainWindow):
         scenarios = {
             0: {  # 初始化工况
                 'name': "初始化电机",
-                'description': "回零，设置上下限10000~60000，向下点动，位置到达10000时调整上下限10000~25000",
+                'description': "回零，设置上下限10000~60000，向下点动，位置到达10000时调整上下限10000~30000",
                 'valves': [],  # 阀门不需要操作
                 'pumps': [],  # 泵不需要操作
                 'motor': [
                     {'func': 'homing'},  # 电机回零
-                    {'func': 'set_limits', 'args': (10000, 25000)},  # 设置初始限位
+                    {'func': 'set_limits', 'args': (10000, 30000)},  # 设置初始限位
                     {'func': 'jog', 'args': (1, 50)},  # 向下点动
                 ]
             },
@@ -2391,20 +2709,27 @@ class IntegratedControlApp(QMainWindow):
                     (0x01, 0x00A4, 0),
                     (0x01, 0x00A3, 0),  # V3: 普通模式
                     (0x01, 0x00A2, 0),
-                    (0x01, 0x00A1, 4),  # V5: 开固定时长模式(模式5)
+                    (0x01, 0x00A1, 0),  # V5: 开固定时长模式(模式5)
 
                     # 控制阀门状态
                     (0x01, 0x000F, 1),  # V1开
                     (0x01, 0x000E, 0),
                     (0x01, 0x000D, 1),  # V3开
                     (0x01, 0x000C, 0),
-                    (0x01, 0x000B, 3001)  # V5开30秒(N=30*100+1=3001)
+                    (0x01, 0x000B, 1)  # V5开30秒(N=30*100+1=3001)
                 ],
                 'pumps': [(0, False, 5), (1, True, 600)],
                 'motor': [
                     # {'func': 'homing'},  # 电机回零
                     # {'func': 'set_limits', 'args': (30000, 60000)},  # 设置限位
-                    {'func': 'jog', 'args': (0, 50)},  # 点动下降直到负限位
+                    {'func': 'jog', 'args': (1, 50)},  # 点动下降直到负限位
+                ],
+                'cameras': [  # 新增
+                    # {'camera': 'A', 'mode': 'single'},                # 单张拍摄模式
+                    # {'camera': 'A', 'mode': 'batch', 'count': 6},     # 批量固定数量拍摄
+                    # {'camera': 'A', 'mode': 'infinite'},              # 批量无限数量拍摄（FPS已经确定）
+                    {'camera': 'A', 'mode': 'infinite', 'use_timing_params': True},   # 批量无限数量拍摄（FPS已经确定，设置拍摄和间隔时间）
+                    # {'camera': 'B', 'mode': 'batch', 'count': 5}
                 ]
             },
 
@@ -2414,22 +2739,21 @@ class IntegratedControlApp(QMainWindow):
                 'valves': [
                     # 设置阀门模式
                     (0x01, 0x00A5, 0),
-                    (0x01, 0x00A4, 4),  # V2: 开固定时长模式
-                    (0x01, 0x00A3, 4),  # V3: 开固定时长模式
+                    (0x01, 0x00A4, 0),  # V2: 开固定时长模式
+                    (0x01, 0x00A3, 0),  # V3: 开固定时长模式
                     (0x01, 0x00A2, 0),
-                    (0x01, 0x00A1, 4),  # V5: 开固定时长模式
+                    (0x01, 0x00A1, 0),  # V5: 开固定时长模式
 
                     # 控制阀门状态
                     (0x01, 0x000F, 0),
-                    (0x01, 0x000E, 6001),  # V2开60秒(N=60*100+1=6001)
-                    (0x01, 0x000D, 6001),  # V3开60秒
+                    (0x01, 0x000E, 1),  # V2开60秒(N=60*100+1=6001)
+                    (0x01, 0x000D, 1),  # V3开60秒
                     (0x01, 0x000C, 0),
-                    (0x01, 0x000B, 6001)  # V5开60秒
+                    (0x01, 0x000B, 1)  # V5开60秒
                 ],
                 'pumps': [(0, False, 5), (1, True, 600)],
                 'timers': [
-                    (60, {'device_type': 'pump', 'device_idx': 0, 'func': 'stop_pump'}),
-                    # todo 这部分定时有点疑问，工况内部还需要定时吗？是否应该切换工况时定时？
+                    (60, {'device_type': 'pump', 'device_idx': 0, 'func': 'stop_pump'}),    # todo 这部分定时有点疑问，工况内部还需要定时吗？是否应该切换工况时定时？
                     (60, {'device_type': 'pump', 'device_idx': 1, 'func': 'stop_pump'})
                 ],
                 'motor': [
@@ -2446,13 +2770,13 @@ class IntegratedControlApp(QMainWindow):
                     (0x01, 0x00A5, 0),  # V1: 普通模式
                     (0x01, 0x00A4, 0),
                     (0x01, 0x00A3, 0),  # V3: 普通模式
-                    (0x01, 0x00A2, 4),  # V4: 开固定时长模式
+                    (0x01, 0x00A2, 0),  # V4: 开固定时长模式
                     (0x01, 0x00A1, 0),  # V5: 开普通模式
                     # 控制阀门状态
                     (0x01, 0x000F, 0),  # V1关
                     (0x01, 0x000E, 0),
                     (0x01, 0x000D, 0),  # V3关
-                    (0x01, 0x000C, 6001),  # V4开60秒(N=60*100+1=6001)
+                    (0x01, 0x000C, 1),  # V4开60秒(N=60*100+1=6001)
                     (0x01, 0x000B, 0),  # V5关
 
                 ],
@@ -2483,17 +2807,6 @@ class IntegratedControlApp(QMainWindow):
                 ]
             }
         }
-
-        # 在浆液路清洗工况中添加泵的定时停止
-        if scenario_id == 2:  # 浆液路清洗工况
-            # 获取设置的泵运行时间（秒）
-            pump_duration = self.scenario2_pump_duration_spin.value()
-
-            # 设置定时器在指定时间后停止泵
-            self.pump_stop_timer.start(pump_duration * 1000)  # 转换为毫秒
-
-            timestamp = time.strftime("%H:%M:%S")
-            self.log_text.append(f"<font color='blue'>[{timestamp}] 已设置泵将在{pump_duration}秒后自动停止</font>")
 
         if scenario_id not in scenarios:
             return
@@ -2592,7 +2905,7 @@ class IntegratedControlApp(QMainWindow):
                         position = self.worker.motors[0].get_position()
 
                         # 检查是否达到目标位置
-                        if position >= 65000:
+                        if position >= 60000:
                             execute_jog(scenario['motor'])
                             break
 
@@ -2616,28 +2929,43 @@ class IntegratedControlApp(QMainWindow):
             else:
                 execute_jog(scenario['motor'])
 
-    def stop_pumps_after_timeout(self):
-        """在设定时间后停止所有泵"""
-        pump_duration = self.scenario2_pump_duration_spin.value()
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_text.append(f"<font color='blue'>[{timestamp}] {pump_duration}秒计时结束，正在停止所有泵</font>")
+        # 控制相机
+        # 控制相机部分修改为：
+        for cam_cfg in scenario.get('cameras', []):
+            cam_key = cam_cfg['camera']
+            cam = self.cameras.get(cam_key)
+            if not cam or not cam.camera or not cam.camera.IsOpen():
+                self.log_text.append(f"<font color='red'>相机{cam_key}未连接，跳过拍摄</font>")
+                continue
 
-        # 停止泵1
-        self.command_queue.put({
-            'device_type': 'pump',
-            'device_idx': 0,
-            'func': 'stop_pump'
-        })
+            mode = cam_cfg['mode']
+            if mode == 'single':
+                cam.start_recording('single')
+                self.log_text.append(f"<font color='blue'>[{timestamp}] 相机{cam_key}单张拍摄已启动</font>")
+            elif mode == 'batch':
+                cam.update_param('num_to_save', cam_cfg.get('count', 10))
+                cam.start_recording('multiple')
+                self.log_text.append(
+                    f"<font color='blue'>[{timestamp}] 相机{cam_key}批量{cam_cfg.get('count', 10)}张已启动</font>")
+            elif mode == 'infinite':
+                use_timing_params = cam_cfg['use_timing_params']    # 是否应用拍摄和间隔时间参数
+                if cam.start_infinite_batch(use_timing_params):
+                    if use_timing_params:
+                        # 时间控制模式
+                        shoot_time = cam.infinite_shoot_time
+                        interval_time = cam.infinite_interval_time
+                        fps = cam.config['frame_rate']
+                        total_per_cycle = int(fps * shoot_time)
 
-        # 停止泵2
-        self.command_queue.put({
-            'device_type': 'pump',
-            'device_idx': 1,
-            'func': 'stop_pump'
-        })
-
-        # 更新日志
-        self.log_text.append(f"<font color='green'>[{timestamp}] 所有泵已停止</font>")
+                        self.log_text.append(
+                            f"<font color='blue'>[{timestamp}] 相机{cam_key}无限批量已启动: "
+                            f"{total_per_cycle}张/次, 拍摄{shoot_time}秒, 间隔{interval_time}秒</font>")
+                    else:
+                        # 单张连续模式
+                        self.log_text.append(
+                            f"<font color='blue'>[{timestamp}] 相机{cam_key}无限批量已启动: 单张连续模式</font>")
+                else:
+                    self.log_text.append(f"<font color='red'>[{timestamp}] 相机{cam_key}启动无限批量失败</font>")
 
     def start_continuous_run(self):
         """开始连续循环运行工况1→2→3→1→..."""
@@ -2664,6 +2992,13 @@ class IntegratedControlApp(QMainWindow):
         """执行当前工况"""
         if not self.is_continuous_running:
             return
+
+        # 停止之前可能正在运行的相机无限拍摄
+        for cam_key, camera in self.cameras.items():
+            if hasattr(camera, 'infinite_batch') and camera.infinite_batch:
+                camera.stop_infinite_batch()
+                timestamp = time.strftime("%H:%M:%S")
+                self.log_text.append(f"<font color='blue'>[{timestamp}] 停止相机{cam_key}的拍摄</font>")
 
         # 激活当前工况
         self.activate_full_scenario(self.current_scenario_index)
@@ -2699,7 +3034,7 @@ class IntegratedControlApp(QMainWindow):
         if self.current_scenario_index == 3 and self.round_count < 10:
             self.current_scenario_index = 1
             self.round_count += 1
-        elif self.current_scenario_index == 3 and self.round_count >= 10:  # 运行10轮后，进行一次初始化
+        elif self.current_scenario_index == 3 and self.round_count >= 10:   # 运行10轮后，进行一次初始化
             self.current_scenario_index = 0
             self.round_count = 1
         else:
@@ -2717,6 +3052,13 @@ class IntegratedControlApp(QMainWindow):
             return
 
         self.is_continuous_running = False
+
+        # 停止所有相机的无限拍摄
+        for cam_key, camera in self.cameras.items():
+            if hasattr(camera, 'infinite_batch') and camera.infinite_batch:
+                camera.stop_infinite_batch()
+                timestamp = time.strftime("%H:%M:%S")
+                self.log_text.append(f"<font color='blue'>[{timestamp}] 相机{cam_key}无限拍摄已停止</font>")
 
         # 停止定时器
         if self.continuous_timer and self.continuous_timer.isActive():

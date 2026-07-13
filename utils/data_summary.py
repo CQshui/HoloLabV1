@@ -82,7 +82,7 @@ class DataSummary_LZM:
         self.figure_classification  = fig2
 
 class DataSummary:
-    def __init__(self, hologram=None, config=None ):
+    def __init__(self, hologram=None, config=None, mode=None):
 
         self._hologram               = hologram
         self._config                 = config

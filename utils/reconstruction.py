@@ -58,7 +58,8 @@ class Reconstruction():
         self.reconstruction_list = []
         '''每一个截面的图像，为了便于前端展示，弄成字典形式，key为z，value为图像'''
         self.reconstruction_dict = {}
-
+        '''新增：每一个截面的z'''
+        self.reconstruction_z = []
         '''保留原始对象用于修改'''
         self._hologram = hologram
 
@@ -95,8 +96,10 @@ class Reconstruction():
         for z, image in zip(self.z_list, self.reconstruction_list):
             key_z = f"Z {z / unit:.3f} {unit_str}"
             self.reconstruction_dict[key_z] = image
+            self.reconstruction_z.append(z)
 
         self._hologram.reconstruction = self.reconstruction_dict
+        self._hologram.reconstruction_z = self.reconstruction_z
 
         self._hologram.status_msg     = f"Reconstruction Finished. Total {len(self.reconstruction_dict)} Planes"
 

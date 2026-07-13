@@ -1,3 +1,6 @@
+"""
+单独的阀控程序
+"""
 import sys
 import serial
 import serial.tools.list_ports
