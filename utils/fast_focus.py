@@ -601,6 +601,7 @@ class FastFocusPCHIP:
             f"Time = {search_time:.2f}s"
         )
 
+        print('opt z', optimal_z)
         return self._optimal_image_full, optimal_z
 
     def modify_hologram_and_config(self):
@@ -651,6 +652,10 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
         self.fft_squa_gpu = fft_mesh_x ** 2 + fft_mesh_y ** 2
 
         self.wavelength_gpu = cp.asarray(self.wavelength)
+
+        # 保存全尺寸信息用于最终输出
+        self._M_full = M_full
+        self._N_full = N_full
 
     def _angular_spectrum_propagate(self, z: float) -> np.ndarray:
         """GPU 加速的单截面重建"""

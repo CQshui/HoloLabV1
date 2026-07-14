@@ -170,7 +170,7 @@ def calculate_brightness_concentration(image):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     # 计算亮度总和与非零像素个数
-    total_brightness = image.sum()
+    # total_brightness = image.sum()
     nonzero_pixels = np.count_nonzero(image)
 
     # 避免除以零
@@ -178,7 +178,7 @@ def calculate_brightness_concentration(image):
         return 0
 
     # 计算集中度
-    concentration = total_brightness / nonzero_pixels
+    # concentration = total_brightness / nonzero_pixels
 
     # 计算亮度方差（无偏估计，ddof=1）
     non_zero_values = image[image != 0]

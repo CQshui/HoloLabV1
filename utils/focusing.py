@@ -30,6 +30,7 @@ from utils.utils_for_focusing.final import RCFLoader, rcf_predict, rcf_predict_V
 from utils.utils_for_focusing.rcf.data_loader import prepare_image_PIL, convert_to_rgb
 
 from utils.fast_focus import FastFocusPCHIP, FastFocusPCHIP_GPU
+from utils.fast_focus_multi import MultiFocusPCHIP, MultiFocusPCHIP_GPU
 
 class Focusing_LZM():
     def __init__(self, hologram, config):
@@ -236,6 +237,11 @@ class Focusing:
             result = self.AutoFocusing_PCHIP()
         elif self.method == 'PCHIP_GPU':
             result = self.AutoFocusing_PCHIP_GPU()
+
+        elif self.method == 'Multi_PCHIP':
+            result = self.AutoFocusing_Multi_PCHIP()
+        elif self.method == 'Multi_PCHIP_GPU':
+            result = self.AutoFocusing_Multi_PCHIP_GPU()
 
         else:
             print('No such choice!')
@@ -1046,7 +1052,7 @@ class Focusing:
             config=self._config,
             rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
             device=self.device,
-            k_size=1
+            k_size=self.rcf_scale
         )
         image, optimal_z = fast_focus.run()
 
@@ -1067,7 +1073,7 @@ class Focusing:
                 config=self._config,
                 rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
                 device=self.device,
-                k_size=1
+                k_size=self.rcf_scale
             )
             image, optimal_z = fast_focus.run()
 
@@ -1080,6 +1086,30 @@ class Focusing:
         except ImportError:
             print("[Warning] CuPy not available, falling back to CPU PCHIP focusing.")
             return self.AutoFocusing_PCHIP()
+    # ========================================================================
+    # Multi_PCHIP 多颗粒 PCHIP 自聚焦
+    # ========================================================================
+    def AutoFocusing_Multi_PCHIP(self):
+        focuser = MultiFocusPCHIP(self._hologram, self._config)
+        focuser.run()
+        self.focusing = focuser.focusing
+        self.focusing_z = focuser.focusing_z
+        self.focusing_xy = focuser.focusing_xy
+        self.focusing_each = focuser.focusing_each
+        return self.focusing
+
+    def AutoFocusing_Multi_PCHIP_GPU(self):
+        try:
+            focuser = MultiFocusPCHIP_GPU(self._hologram, self._config)
+            focuser.run()
+            self.focusing = focuser.focusing
+            self.focusing_z = focuser.focusing_z
+            self.focusing_xy = focuser.focusing_xy
+            self.focusing_each = focuser.focusing_each
+            return self.focusing
+        except ImportError:
+            print("[Warning] CuPy not available, falling back to CPU Multi_PCHIP.")
+            return self.AutoFocusing_Multi_PCHIP()
 
 def batch_Focusing(root=r'F:\lichenghao\data', method='AI_GPU'):
     # 指定使用的GPU

@@ -129,8 +129,8 @@ class HoloConfig:
         'gpu_num'       : 1
     })
     focusing:               Dict[str, Any] = field(default_factory=lambda: {
-        'method'            : 'AI_Gradient',
-        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient', 'PCHIP', 'PCHIP_GPU'],
+        'method'            : 'Multi_PCHIP_GPU',
+        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient', 'PCHIP', 'PCHIP_GPU', 'Multi_PCHIP', 'Multi_PCHIP_GPU'],
         'yolo_model_path'   : r'E:\Projects\HoloLabV1\models/focusing/yolo_detection.pth',
         'rcf_model_path'    : r'E:\Projects\HoloLabV1\models/focusing/rcf_edge_detection.pth',
         'rcf_scale'         : 8,  # rcf所处理图像的缩放倍率，图像原尺寸要/scale
@@ -144,14 +144,23 @@ class HoloConfig:
     })
     '''PCHIP 快速自聚焦参数_____________________________________'''
     fast_focus:             Dict[str, Any] = field(default_factory=lambda: {
-        'method'                : 'PCHIP',
+        'method'                : 'PCHIP_GPU',
         'method_list'           : ['PCHIP', 'PCHIP_GPU'],
-        'z_start'               : -8.0,       # PCHIP搜索范围下界（单位：mm）
-        'z_end'                 : 8.0,        # PCHIP搜索范围上界（单位：mm）
+        'z_start'               : -1,       # PCHIP搜索范围下界（单位：mm）
+        'z_end'                 : 0,        # PCHIP搜索范围上界（单位：mm）
         'metric'                : 'variance', # 聚焦评价指标：variance, gradient, laplacian, tenengrad, energy, brenner
         'metric_list'           : ['variance', 'gradient', 'laplacian', 'tenengrad', 'energy', 'brenner'],
-        'max_evals'             : 30,         # 最大重建评估次数
+        'max_evals'             : 100,         # 最大重建评估次数
         'initial_points_factor' : 1.0,        # 初始采样点数因子（越大初始采样越多）
+    })
+    '''多颗粒 PCHIP 自聚焦参数_____________________________________'''
+    fast_focus_multi:       Dict[str, Any] = field(default_factory=lambda: {
+        'method'                    : 'Multi_PCHIP_GPU',
+        'method_list'               : ['Multi_PCHIP', 'Multi_PCHIP_GPU'],
+        'initial_global_planes'     : 5,    # 初始全局平面数（YOLO+SORT 建立轨迹）
+        'max_pchip_rounds'          : 50,    # PCHIP 迭代轮数
+        'max_evals_per_particle'    : 50,   # 每个颗粒最大评估次数
+        'crop_margin'               : 20,   # 局部裁剪边距（像素）
     })
 
 
