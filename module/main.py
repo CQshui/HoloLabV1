@@ -122,6 +122,7 @@ class Holo_Processor(QObject):
             img_dict = {img_key: img}
 
             self.images[img_key] = img_dict
+            print('预处理结束')
             self.image_ready.emit(img_key, img_dict, f"{img_key} Finished. {status_msg}")
 
         elif action_key == "polarization":
@@ -137,6 +138,7 @@ class Holo_Processor(QObject):
             worker_spectrum = Spectrum(hologram=self.hologram, config=self.config)
             worker_spectrum.run()
             self._show_spectrum()
+            print('频谱结束')
 
         elif action_key == "reconstruction":
             self.image_ready.emit("Reconstruction", {}, f"Reconstruction method: {self.config.reconstruction['method']}, On Going, Please wait ... ...")
@@ -144,6 +146,7 @@ class Holo_Processor(QObject):
             worker_reconstruction = Reconstruction(hologram=self.hologram ,config=self.config)
             worker_reconstruction.run()
             self._show_reconstruction()
+            print('重建结束')
 
         elif action_key == "focusing":
             self.image_ready.emit("Focusing", {}, f"Focusing method: {self.config.focusing['method']}, On Going, Please wait ... ...")
@@ -152,6 +155,7 @@ class Holo_Processor(QObject):
             worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
             worker_focusing.run()
             self._show_focusing()
+            print('自聚焦结束')
 
         elif action_key == "segmentation":
             self.image_ready.emit("Segmentation", {}, f"Segmentation method: {self.config.segmentation['method']}, On Going, Please wait ... ...")

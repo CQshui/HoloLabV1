@@ -100,8 +100,8 @@ class HoloConfig:
         'ROI_rectangle'     : {
             'center_x'      : 50,
             'center_y'      : 50,
-            'rect_width'    : 50,
-            'rect_height'   : 50
+            'rect_width'    : 200,
+            'rect_height'   : 200
         },
         'model_path'        : 'E:\Projects\HoloLabV1\models/spectrum',
         'model_name'        : 'model_name'
@@ -114,8 +114,8 @@ class HoloConfig:
         'model_name'    : 'model_name',
         'cpu_num'       : 10,
         'gpu_num'       : 1,
-        'z_start'       : 0.200,     # 实际需要 * unit_mm
-        'z_end'         : 0.600,     # 实际需要 * unit_mm
+        'z_start'       : -0.600,     # 实际需要 * unit_mm
+        'z_end'         : 0.0,     # 实际需要 * unit_mm
         'z_step'        : 0.020     # 实际需要 * unit_mm
     })
 

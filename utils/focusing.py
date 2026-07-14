@@ -142,9 +142,20 @@ class Focusing:
         self.focusing_xy     = []   # 每个颗粒的位置框坐标，嵌套列表[[x1,y1,x2,y2],
         self.focusing_each   = {}
 
+        print('1')
         _reconstruction      = hologram.reconstruction
         _reconstruction_list = [_reconstruction[i] for i in _reconstruction.keys()]
+        # 缩放加速：每张图缩小到 1/rcf_scale 后再拼 stack
+        if len(_reconstruction_list) > 0:
+            h_full, w_full = _reconstruction_list[0].shape[:2]
+            scale = config.focusing['rcf_scale']
+            h_small, w_small = h_full // scale, w_full // scale
+            _reconstruction_list = [
+                cv2.resize(img, (w_small, h_small), interpolation=cv2.INTER_LINEAR)
+                for img in _reconstruction_list
+            ]
         self.stack           = np.stack(_reconstruction_list, axis=2).astype(np.float64) * 255  #(height, width, num)或 axis=-1
+        print('2')
 
         self.method         = config.focusing['method']
         self.device         = torch.device(config.focusing['device'])
@@ -759,7 +770,7 @@ class Focusing:
             stacks, stacks_ori, names = tracker.get_stacks()
 
         # 修改后的并行处理代码
-        processor = RCFProcessor(self.rcfModel, self.device, stacks, stacks_ori, rcf_scale=self.rcf_scale,
+        processor = RCFProcessor(self.rcfModel, self.device, stacks, stacks_ori, rcf_scale=1,
                                  z_list=self._hologram.reconstruction_z)
 
         # 使用 ProcessPoolExecutor.map 并行处理
@@ -856,7 +867,7 @@ class Focusing:
             # img_tmp, name_tmp = rcf_predict(self.rcfModel, get_dataset(stack, stack_ori, k_size=self.rcf_scale), device=self.device)
 
             # V1
-            dataset = RCFLoader(stack, stack_ori, k_size=self.rcf_scale)
+            dataset = RCFLoader(stack, stack_ori, k_size=1)
             loader = DataLoader(dataset, batch_size=64, num_workers=0, pin_memory=True)
 
             img_tmp, index_tmp = rcf_predict_V1(self.rcfModel, loader, device=self.device)
@@ -937,7 +948,7 @@ class Focusing:
             H_max = max(H_max, h_img, h_ori)
             W_max = max(W_max, w_img, w_ori)
 
-            ds = RCFLoader(stack, stack_ori, k_size=self.rcf_scale)
+            ds = RCFLoader(stack, stack_ori, k_size=1)
             all_datasets.append(ds)
             particle_sizes.append(len(ds))  # 一般是 26
 
@@ -1035,7 +1046,7 @@ class Focusing:
             config=self._config,
             rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
             device=self.device,
-            k_size=self.rcf_scale
+            k_size=1
         )
         image, optimal_z = fast_focus.run()
 
@@ -1056,7 +1067,7 @@ class Focusing:
                 config=self._config,
                 rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
                 device=self.device,
-                k_size=self.rcf_scale
+                k_size=1
             )
             image, optimal_z = fast_focus.run()
 
