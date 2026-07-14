@@ -16,10 +16,10 @@ class HoloConfig:
     '''图像参数_________________________________________'''
 
     file_info:              Dict[str, Any] = field(default_factory=lambda: {
-        'holo_type'     : "Inline",
+        'holo_type'     : "Off-Axis",
         'holo_type_list': ['Inline', 'Off-Axis'],
         'image_path'    : r'E:\Projects\HoloLabV1\test_data/hologram',
-        'image_name'    : 'inline_multi_particle.jpg'
+        'image_name'    : 'Image__2024-04-26__20-13-40.bmp'
         # 'read_mode'     : 'Single Image',
         # 'read_mode_list': ['Single Image', 'Multi Images']
     })
@@ -56,7 +56,7 @@ class HoloConfig:
     })
 
     image_info:             Dict[str, Any] = field(default_factory=lambda: {
-        'pixel_size'        : 5.0,   # um
+        'pixel_size'        : 0.098,   # um
         'wavelength'        : 532.0,   # nm
         'pixel_num_x'       : 'None',
         'pixel_num_y'       : 'None',
@@ -93,9 +93,9 @@ class HoloConfig:
     })
 
     spectrum:               Dict[str, Any] = field(default_factory=lambda: {
-        'method'            : 'Manual_Select',
+        'method'            : 'Auto_Define',
         'method_list'       : ['Manual_Select', 'Give_Values', 'Auto_Define'],
-        'center_mask_radius': 100,
+        'center_mask_radius': 500,
         'threshold'         : 180,
         'ROI_rectangle'     : {
             'center_x'      : 50,
@@ -114,9 +114,9 @@ class HoloConfig:
         'model_name'    : 'model_name',
         'cpu_num'       : 10,
         'gpu_num'       : 1,
-        'z_start'       : 40.0,     # 实际需要 * unit_mm
-        'z_end'         : 100.0,     # 实际需要 * unit_mm
-        'z_step'        : 1.00     # 实际需要 * unit_mm
+        'z_start'       : 0.200,     # 实际需要 * unit_mm
+        'z_end'         : 0.600,     # 实际需要 * unit_mm
+        'z_step'        : 0.020     # 实际需要 * unit_mm
     })
 
     focusing_BackUP:        Dict[str, Any] = field(default_factory=lambda: {
@@ -130,10 +130,10 @@ class HoloConfig:
     })
     focusing:               Dict[str, Any] = field(default_factory=lambda: {
         'method'            : 'AI_Gradient',
-        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient'],
+        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient', 'PCHIP', 'PCHIP_GPU'],
         'yolo_model_path'   : r'E:\Projects\HoloLabV1\models/focusing/yolo_detection.pth',
         'rcf_model_path'    : r'E:\Projects\HoloLabV1\models/focusing/rcf_edge_detection.pth',
-        'rcf_scale'         : 2,  # rcf所处理图像的缩放倍率，图像原尺寸要/scale
+        'rcf_scale'         : 8,  # rcf所处理图像的缩放倍率，图像原尺寸要/scale
         'device'            : 'cuda',
         'device_list'       : ['cuda', 'cpu'],
         'cpu_num'           : 8,
@@ -142,6 +142,18 @@ class HoloConfig:
         # 批量处理：根目录，下有每个图像对应子文件夹，子文件夹内部有reconstruction文件夹存放重建图像
         'get_model'         : False  # 批量处理：如果为True，将直接给Focus类传入模型本身，而不是根据路径加载模型
     })
+    '''PCHIP 快速自聚焦参数_____________________________________'''
+    fast_focus:             Dict[str, Any] = field(default_factory=lambda: {
+        'method'                : 'PCHIP',
+        'method_list'           : ['PCHIP', 'PCHIP_GPU'],
+        'z_start'               : -8.0,       # PCHIP搜索范围下界（单位：mm）
+        'z_end'                 : 8.0,        # PCHIP搜索范围上界（单位：mm）
+        'metric'                : 'variance', # 聚焦评价指标：variance, gradient, laplacian, tenengrad, energy, brenner
+        'metric_list'           : ['variance', 'gradient', 'laplacian', 'tenengrad', 'energy', 'brenner'],
+        'max_evals'             : 30,         # 最大重建评估次数
+        'initial_points_factor' : 1.0,        # 初始采样点数因子（越大初始采样越多）
+    })
+
 
     segmentation_BackUP:    Dict[str, Any] = field(default_factory=lambda: {
         'method'        : 'Deep_Learning',

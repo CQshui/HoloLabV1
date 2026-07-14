@@ -29,6 +29,8 @@ from utils.utils_for_focusing.rcf.models.RCF_ASPP import RCF_ASPP
 from utils.utils_for_focusing.final import RCFLoader, rcf_predict, rcf_predict_V1, rcf_predict_V2
 from utils.utils_for_focusing.rcf.data_loader import prepare_image_PIL, convert_to_rgb
 
+from utils.fast_focus import FastFocusPCHIP, FastFocusPCHIP_GPU
+
 class Focusing_LZM():
     def __init__(self, hologram, config):
 
@@ -169,10 +171,23 @@ class Focusing:
         elif not Focusing._model_loaded and self.method in ['AI', 'AI_Wavelet', 'AI_Gradient']:
             self.load_model()
             Focusing._model_loaded = True
+        elif self.method in ['PCHIP', 'PCHIP_GPU']:
+            # PCHIP 方法需要 RCF 模型（做边缘预测计算聚焦分数），但不需要 YOLO
+            self.yoloModel = None
+            if not Focusing._model_loaded:
+                self.load_rcf_model()
+                Focusing._model_loaded = True
+            else:
+                self.rcfModel = Focusing._rcf_model
+                if self.rcfModel is not None:
+                    self.rcfModel.to(self.device)
         else:
             self.yoloModel = Focusing._yolo_model
-            self.yoloModel.net.to(self.device)
-            self.rcfModel = Focusing._rcf_model.to(self.device)
+            if self.yoloModel is not None:
+                self.yoloModel.net.to(self.device)
+            self.rcfModel = Focusing._rcf_model
+            if self.rcfModel is not None:
+                self.rcfModel.to(self.device)
 
         '''保留原始对象用于修改'''
         self._hologram      = hologram
@@ -205,6 +220,11 @@ class Focusing:
             result = self.AutoFocusing_Gradient_Variance_AI_CPU()
         elif self.method == 'AI_Gradient' and self.device.type == 'cuda':
             result = self.AutoFocusing_Gradient_Variance_AI_GPU()
+
+        elif self.method == 'PCHIP':
+            result = self.AutoFocusing_PCHIP()
+        elif self.method == 'PCHIP_GPU':
+            result = self.AutoFocusing_PCHIP_GPU()
 
         else:
             print('No such choice!')
@@ -249,6 +269,17 @@ class Focusing:
                 save_path_file  = os.path.join(save_path, save_name)
                 cv2.imwrite(save_path_file, image)
 
+    # 只加载 RCF 模型（用于 PCHIP 方法），不加载 YOLO
+    def load_rcf_model(self):
+        """加载 RCF 边缘检测模型（用于 PCHIP 快速自聚焦的聚焦分数计算）"""
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
+        from utils.utils_for_focusing.rcf.models.RCF import RCF
+        self.rcfModel = RCF(self.device)
+        self.rcfModel.to(self.device)
+        checkpoint = torch.load(self.rcfModel_path, map_location=self.device)
+        self.rcfModel.load_state_dict(checkpoint['state_dict'])
+        Focusing._rcf_model = self.rcfModel
+
     # 在没有外部传入模型时，根据模型路径加载模型
     def load_model(self):
         if self.get_model:
@@ -281,6 +312,14 @@ class Focusing:
     def AutoFocusing_WaveLet_CPU(self):
         h, w, num_images = self.stack.shape
 
+        # 对 stack 做缩放加速处理
+        scale = self.rcf_scale
+        h_small, w_small = h // scale, w // scale
+        stack_small = np.stack([
+            cv2.resize(self.stack[:, :, i], (w_small, h_small), interpolation=cv2.INTER_LINEAR)
+            for i in range(num_images)
+        ], axis=-1)
+
         # 以下为小波拓展所需参数
         wavelet = 'db2'
         window_size = 5
@@ -289,9 +328,9 @@ class Focusing:
 
         coeffs_list = []
 
-        # 遍历并提取每个图像
-        for i in range(self.stack.shape[2]):
-            img = self.stack[:, :, i]
+        # 遍历并提取每个图像（在缩小后的 stack 上操作）
+        for i in range(num_images):
+            img = stack_small[:, :, i]
             current_img = img.copy()
 
             # 图像预处理，确保尺寸合理
@@ -373,22 +412,30 @@ class Focusing:
         reconstructed = reconstructed[:target_h, :target_w]
 
         # 回归原有尺寸
-        reconstructed = cv2.resize(reconstructed, (w, h))
+        reconstructed = cv2.resize(reconstructed, (w * scale, h * scale))
+        h, w = h * scale, w * scale  # 恢复为全尺寸
 
         self.focusing = np.clip(reconstructed, 0, 255).astype(np.uint8)
         return self.focusing
 
     def AutoFocusing_WaveLet_GPU(self):
-        # print(torch.cuda.is_available())  # 应输出True才能使用GPU
-        # print(torch.cuda.device_count())  # 可用GPU数量
-
         h, w, num_images = self.stack.shape
+
+        # 对 stack 做缩放加速处理
+        scale = self.rcf_scale
+        h_small, w_small = h // scale, w // scale
+        stack_small = np.stack([
+            cv2.resize(self.stack[:, :, i], (w_small, h_small), interpolation=cv2.INTER_LINEAR)
+            for i in range(num_images)
+        ], axis=-1)
+        h, w = h_small, w_small
+
         wavelet = 'db2'
         window_size = 5
         level = 3
 
         # 将数据转移到GPU
-        stack_np = self.stack.astype(np.float32)
+        stack_np = stack_small.astype(np.float32)
         stack_tensor = torch.from_numpy(stack_np).permute(2, 0, 1).unsqueeze(1).to(self.device)  # (num_images, 1, h, w)
 
         # 预处理填充
@@ -457,6 +504,8 @@ class Focusing:
         result = F.interpolate(result, size=(h, w), mode='bicubic', align_corners=False)
         result = result.squeeze().cpu().numpy()
         result = cv2.resize(result, (w, h))
+        # resize 回全尺寸
+        result = cv2.resize(result, (w * scale, h * scale))
 
         self.focusing = np.clip(result, 0, 255).astype(np.uint8)
         return self.focusing
@@ -496,7 +545,15 @@ class Focusing:
         self.focusing = wavelet_processed
 
     def AutoFocusing_Gradient_Variance_CPU(self):
-        images = [self.stack[:, :, i] for i in range(self.stack.shape[2])]
+        h_full, w_full = self.stack.shape[0], self.stack.shape[1]
+        num_images = self.stack.shape[2]
+
+        # 缩放加速处理
+        scale = self.rcf_scale
+        h_small, w_small = h_full // scale, w_full // scale
+        images = [cv2.resize(self.stack[:, :, i], (w_small, h_small), interpolation=cv2.INTER_LINEAR)
+                  for i in range(num_images)]
+
         window_size = 5  # 与小波方法中的window_size保持一致
 
         # 计算局部方差
@@ -521,6 +578,9 @@ class Focusing:
         for n in range(len(images)):
             mask = (max_indices == n)
             fused[mask] = images[n][mask]
+
+        # resize 回全尺寸
+        fused = cv2.resize(fused, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
 
         self.focusing = np.clip(fused, 0, 255).astype(np.uint8)
         return self.focusing
@@ -563,7 +623,15 @@ class Focusing:
 
     def AutoFocusing_Gradient_Variance_GPU(self):
         tm = time.time()
-        images = [self.stack[:, :, i] for i in range(self.stack.shape[2])]
+        h_full, w_full = self.stack.shape[0], self.stack.shape[1]
+        num_images = self.stack.shape[2]
+
+        # 缩放加速处理
+        scale = self.rcf_scale
+        h_small, w_small = h_full // scale, w_full // scale
+        images = [cv2.resize(self.stack[:, :, i], (w_small, h_small), interpolation=cv2.INTER_LINEAR)
+                  for i in range(num_images)]
+
         window_size = 5  # 与小波方法中的window_size保持一致
 
         # 将数据转移到GPU
@@ -592,6 +660,8 @@ class Focusing:
 
         # 将结果从GPU转移到CPU
         fused_cpu = fused.cpu().numpy()
+        # resize 回全尺寸
+        fused_cpu = cv2.resize(fused_cpu, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
         self.focusing = fused_cpu.astype(np.uint8)
         tm1 = time.time()
         print('gradient', tm1 - tm)
@@ -946,6 +1016,59 @@ class Focusing:
             self.focusing = create_square_mosaic(focused_particles)
             for i, img in enumerate(focused_particles):
                 self.focusing_each[str(i)] = img
+
+
+    # ========================================================================
+    # PCHIP 快速自聚焦方法
+    # ========================================================================
+    def AutoFocusing_PCHIP(self):
+        """
+        PCHIP 快速自聚焦（CPU 版）
+
+        假设所有颗粒位于同一聚焦面，利用 PCHIP 插值代理模型
+        搜索最优聚焦深度 z，仅需 ~30 次单截面重建即可找到全局最优。
+
+        聚焦分数 = RCF 边缘预测 → 亮度集中度（非零像素方差）
+        """
+        fast_focus = FastFocusPCHIP(
+            hologram=self._hologram,
+            config=self._config,
+            rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
+            device=self.device,
+            k_size=self.rcf_scale
+        )
+        image, optimal_z = fast_focus.run()
+
+        self.focusing = image
+        self.focusing_z = [optimal_z]
+        self.focusing_each = {}
+
+        return image
+
+    def AutoFocusing_PCHIP_GPU(self):
+        """
+        PCHIP 快速自聚焦（GPU 版，使用 CuPy 加速角谱法重建）
+        RCF 推理仍使用 PyTorch GPU
+        """
+        try:
+            fast_focus = FastFocusPCHIP_GPU(
+                hologram=self._hologram,
+                config=self._config,
+                rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
+                device=self.device,
+                k_size=self.rcf_scale
+            )
+            image, optimal_z = fast_focus.run()
+
+            self.focusing = image
+            self.focusing_z = [optimal_z]
+            self.focusing_each = {}
+
+            return image
+
+        except ImportError:
+            print("[Warning] CuPy not available, falling back to CPU PCHIP focusing.")
+            return self.AutoFocusing_PCHIP()
 
 def batch_Focusing(root=r'F:\lichenghao\data', method='AI_GPU'):
     # 指定使用的GPU

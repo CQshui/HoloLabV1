@@ -3,7 +3,7 @@ from hologram import Hologram
 from utils.open_image import OpenImage
 from utils.preprocessing import PreProcessing
 from utils.spectrum import Spectrum
-from utils.reconstruction import Reconstruction, Reconstruction_DongJY
+from utils.reconstruction import Reconstruction
 from utils.focusing import Focusing
 from utils.segmentation import Segmentation
 from utils.identification import Identification
