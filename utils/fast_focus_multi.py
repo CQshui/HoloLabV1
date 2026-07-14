@@ -289,9 +289,9 @@ class MultiFocusPCHIP:
             result = torch.squeeze(results[-1].detach()).cpu().numpy()
 
         # 聚焦分数
+        # 【注意】避免在 GPU 计算流程中执行磁盘 I/O，可能引发时序问题
         result_pil = Image.fromarray((result * 255).astype(np.uint8))
-        # 可选保存中间结果，生产环境可注释掉
-        result_pil.save(r'E:\Projects\HoloLabV1\tmp\rcf_results\{:.4f}.png'.format(time.time()))
+        # result_pil.save(r'E:\Projects\HoloLabV1\tmp\rcf_results\{:.4f}.png'.format(time.time()))
         concentration = calculate_brightness_concentration(np.array(result_pil))
         return concentration
 
@@ -580,46 +580,72 @@ class MultiFocusPCHIP:
 class MultiFocusPCHIP_GPU(MultiFocusPCHIP):
     """
     多颗粒 PCHIP 自聚焦（GPU 加速版）
-    使用 CuPy 加速批量角谱法重建
+    完全使用 PyTorch 进行批量角谱重建，避免 CuPy 与 PyTorch 的 CUDA 上下文冲突。
     """
 
     def _batch_reconstruct(self, z_values: List[float]) -> Dict[float, np.ndarray]:
-        """GPU 加速的批量重建"""
-        import cupy as cp
-        from numpy.fft import fftshift, ifftshift
-
-        # 频谱裁剪
+        """
+        PyTorch 实现的批量角谱重建。
+        输入：需要重建的 z 值列表
+        返回：{z: 振幅图像(缩放尺寸, numpy)}
+        """
+        # 频谱裁剪（与原始逻辑一致）
         scale = self.rcf_scale
         M_full, N_full = self._hologram.spectrum.shape
         M_crop = M_full // scale
         N_crop = N_full // scale
         M_start = (M_full - M_crop) // 2
         N_start = (N_full - N_crop) // 2
-        spectrum_cropped = self._hologram.spectrum[M_start:M_start + M_crop, N_start:N_start + N_crop]
+        spectrum_cropped = self._hologram.spectrum[
+            M_start:M_start + M_crop, N_start:N_start + N_crop
+        ]
 
-        # CuPy
-        spectrum_gpu = cp.asarray(spectrum_cropped)
+        # 转为 PyTorch tensor (complex64 保持精度，设备与模型一致)
+        spectrum = torch.as_tensor(spectrum_cropped, device=self.device, dtype=torch.complex64)
+
+        # 缩放后的像素尺寸
         pixel_size_scaled = self.pixel_size * scale
-        wavelength_gpu = cp.asarray(self.wavelength)
+        wavelength = self.wavelength
 
-        M, N = spectrum_gpu.shape
-        fft_x = cp.fft.fftshift(cp.fft.fftfreq(N, d=pixel_size_scaled))
-        fft_y = cp.fft.fftshift(cp.fft.fftfreq(M, d=pixel_size_scaled))
-        fft_mesh_x, fft_mesh_y = cp.meshgrid(fft_x, fft_y)
-        fft_squa_gpu = fft_mesh_x ** 2 + fft_mesh_y ** 2
+        M, N = spectrum.shape
 
-        # 向量化重建
-        z_gpu = cp.asarray(sorted(set(z_values)), dtype=cp.float64)
-        z_reshaped = z_gpu[:, cp.newaxis, cp.newaxis]
+        # 生成频率坐标（与 CuPy 版本一致）
+        fft_x = torch.fft.fftshift(torch.fft.fftfreq(N, d=pixel_size_scaled, device=self.device))
+        fft_y = torch.fft.fftshift(torch.fft.fftfreq(M, d=pixel_size_scaled, device=self.device))
+        fft_mesh_x, fft_mesh_y = torch.meshgrid(fft_x, fft_y, indexing='xy')
+        fft_squa = fft_mesh_x ** 2 + fft_mesh_y ** 2
 
-        H = cp.exp(1j * 2 * cp.pi / wavelength_gpu * z_reshaped) * \
-            cp.exp(-1j * cp.pi * wavelength_gpu * z_reshaped * fft_squa_gpu)
+        # 去重并排序 z 值
+        z_unique = sorted(set(z_values))
+        z_tensor = torch.tensor(z_unique, device=self.device, dtype=torch.float32)
 
-        A = H * spectrum_gpu[cp.newaxis, :, :]
-        U = cp.fft.ifft2(cp.fft.ifftshift(A, axes=(1, 2)), axes=(1, 2))
+        # 传播核: H = exp(j*2π/λ*z) * exp(-j*π*λ*z*(fx^2+fy^2))
+        k0 = 2 * torch.pi / wavelength
+        phase1 = k0 * z_tensor[:, None, None]                     # (num_z, 1, 1)
+        phase2 = -torch.pi * wavelength * z_tensor[:, None, None] * fft_squa[None, :, :]
+        H = torch.exp(1j * (phase1 + phase2))
 
-        # 转回 numpy
+        # 批量重建
+        A = H * spectrum[None, :, :]                               # (num_z, M, N)
+        # 注意: PyTorch 的 ifft2 期望输入形状为 (..., M, N)，dim=(-2,-1) 默认正确
+        # 先 ifftshift 再 ifft2
+        A_shifted = torch.fft.ifftshift(A, dim=(-2, -1))          # 将零频移到中心
+        U = torch.fft.ifft2(A_shifted, dim=(-2, -1))              # 复数场
+
+        # 取振幅并转回 numpy（同步 GPU 操作）
+        amplitude = torch.abs(U)
+
+        # 确保所有计算完成后再取数据
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+
         result = {}
-        for i, z in enumerate(sorted(set(z_values))):
-            result[z] = cp.asnumpy(cp.abs(U[i]))
+        for i, z in enumerate(z_unique):
+            result[z] = amplitude[i].cpu().numpy()
+
+        # 清理显存（可选）
+        del spectrum, H, A, U, amplitude
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+
         return result
