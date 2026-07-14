@@ -157,6 +157,14 @@ class Holo_Processor(QObject):
             self._show_focusing()
             print('自聚焦结束')
 
+        elif action_key == "pchip":
+            # PCHIP 快速自聚焦（同时包含重建 + 聚焦）
+            self.image_ready.emit("Focusing", {}, f"PCHIP Fast Focus: {self.config.focusing['method']}, On Going, Please wait ... ...")
+            worker_focusing = Focusing(hologram=self.hologram, config=self.config)
+            worker_focusing.run()
+            self._show_focusing()
+            print('PCHIP 快速自聚焦结束')
+
         elif action_key == "segmentation":
             self.image_ready.emit("Segmentation", {}, f"Segmentation method: {self.config.segmentation['method']}, On Going, Please wait ... ...")
 
@@ -234,6 +242,8 @@ class Holo_Processor(QObject):
                 self.run("reconstruction")
             if self.config.operation_options['run_focusing']:
                 self.run("focusing")
+            if self.config.operation_options['run_pchip']:
+                self.run("pchip")
             if self.config.operation_options['run_segmentation']:
                 self.run("segmentation")
             if self.config.operation_options['run_identification']:
@@ -388,6 +398,11 @@ class Holo_Processor(QObject):
                     worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
                     worker_focusing.run()
                     self.image_ready.emit("Multi Processing", {}, 'Focusing > ')
+                if self.config.multi_processing.get('run_pchip', False):
+                    self.image_ready.emit("Multi Processing", {}, 'PCHIP > ')
+                    worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
+                    worker_focusing.run()
+                    self.image_ready.emit("Multi Processing", {}, 'PCHIP Done > ')
 
                 if self.config.multi_processing['run_segmentation']:
                     worker_segmentation = Segmentation(hologram=self.hologram ,config=self.config)
@@ -1449,6 +1464,7 @@ class MainWindow(QMainWindow):
         param_layout.addWidget(self.create_spectrum_group())
         param_layout.addWidget(self.create_reconstruction_group())
         param_layout.addWidget(self.create_focusing_group())
+        param_layout.addWidget(self.create_fast_focus_group())
         param_layout.addWidget(self.create_segmentation_group())
         param_layout.addWidget(self.create_identification_group())
         param_layout.addWidget(self.create_phase_group())
@@ -2293,11 +2309,13 @@ class MainWindow(QMainWindow):
     def create_focusing_group(self):
         # conf = self.config.get("focusing", {})
         conf = self.config.focusing if hasattr(self.config, 'focusing') else {}
+        # Filter out PCHIP methods
+        non_pchip_methods = [m for m in conf.get("method_list", []) if 'PCHIP' not in m.upper()]
         return self._create_group("Focusing", {
             "focusing.method": {
                 "type": "combo",
                 "value": conf.get("method", "None"),
-                "options": conf.get("method_list", []),
+                "options": non_pchip_methods,
                 "name": "Method"
             },
 
@@ -2305,16 +2323,6 @@ class MainWindow(QMainWindow):
                 "type": "input",
                 "value": conf.get("yolo_model_path", ""),
                 "name": "Yolo Path"
-            },
-            "focusing.rcf_model_path": {
-                "type": "input",
-                "value": conf.get("rcf_model_path", ""),
-                "name": "RCF Path"
-            },
-            "focusing.rcf_scale": {
-                "type": "input",
-                "value": str(conf.get("rcf_scale", "8")),
-                "name": "RCF Scale"
             },
 
             "line1": {"type": "line"},
@@ -2345,21 +2353,123 @@ class MainWindow(QMainWindow):
 
         })
 
-    def create_segmentation_group_(self):
-        # conf = self.config.get("segmentation", {})
-        conf = self.config.segmentation if hasattr(self.config,'segmentation') else {}
-        return self._create_group("Segmentation", {
-            "segmentation.method": {
+    
+    def create_fast_focus_group(self):
+        """PCHIP Fast Autofocus parameters (separate from regular focusing)"""
+        ff_conf = self.config.fast_focus if hasattr(self.config, 'fast_focus') else {}
+        ffm_conf = self.config.fast_focus_multi if hasattr(self.config, 'fast_focus_multi') else {}
+        foc_conf = self.config.focusing if hasattr(self.config, 'focusing') else {}
+        # Only show PCHIP-related methods
+        pchip_methods = [m for m in foc_conf.get("method_list", []) if 'PCHIP' in m.upper()]
+        return self._create_group("PCHIP Fast Focus", {
+            "focusing.method": {
                 "type": "combo",
-                "value": conf.get("method", "None"),
-                "options": conf.get("method_list", []),
+                "value": foc_conf.get("method", "None"),
+                "options": pchip_methods,
                 "name": "Method"
             },
-            "segmentation.gray_thresh": {"type": "input", "value": str(conf.get("gray_thresh", "127")), "name": "Gray Threshold"},
-            "segmentation.block_size": {"type": "input", "value": str(conf.get("block_size", "32")), "name": "Block Size"},
-            "segmentation.model_path": {"type": "input", "value": conf.get("model_path", ""), "name": "Model Path"},
-            "segmentation.model_name": {"type": "input", "value": conf.get("model_name", ""), "name": "Model Name"},
+
+            "focusing.rcf_model_path": {
+                "type": "input",
+                "value": foc_conf.get("rcf_model_path", ""),
+                "name": "RCF Model Path"
+            },
+            "focusing.rcf_scale": {
+                "type": "input",
+                "value": str(foc_conf.get("rcf_scale", "8")),
+                "name": "RCF Scale"
+            },
+
+            "line1": {"type": "line"},
+
+            "fast_focus.z_start": {
+                "type": "input",
+                "value": str(ff_conf.get("z_start", "-1")),
+                "name": "Z Start (mm)"
+            },
+            "fast_focus.z_end": {
+                "type": "input",
+                "value": str(ff_conf.get("z_end", "0")),
+                "name": "Z End (mm)"
+            },
+            "fast_focus.metric": {
+                "type": "combo",
+                "value": ff_conf.get("metric", "variance"),
+                "options": ff_conf.get("metric_list", []),
+                "name": "Metric"
+            },
+            "fast_focus.initial_points_factor": {
+                "type": "input",
+                "value": str(ff_conf.get("initial_points_factor", "1.0")),
+                "name": "Initial Points Factor"
+            },
+
+            "line2": {"type": "line"},
+
+            "group1": {"type": "group", "name": "Multi-Particle PCHIP"},
+
+            "fast_focus_multi.initial_global_planes": {
+                "type": "input",
+                "value": str(ffm_conf.get("initial_global_planes", "5")),
+                "name": "Initial Global Planes"
+            },
+            "fast_focus_multi.max_pchip_rounds": {
+                "type": "input",
+                "value": str(ffm_conf.get("max_pchip_rounds", "50")),
+                "name": "Max PCHIP Rounds"
+            },
+            "fast_focus_multi.max_evals_per_particle": {
+                "type": "input",
+                "value": str(ffm_conf.get("max_evals_per_particle", "50")),
+                "name": "Max Evals Per Particle"
+            },
+            "fast_focus_multi.crop_margin": {
+                "type": "input",
+                "value": str(ffm_conf.get("crop_margin", "20")),
+                "name": "Crop Margin (px)"
+            },
+
+            "line3": {"type": "line"},
+
+            "focusing.device": {
+                "type": "combo",
+                "value": foc_conf.get("device", "cpu"),
+                "options": foc_conf.get("device_list", []),
+                "name": "Device"
+            },
+            "focusing.cpu_num": {
+                "type": "input",
+                "value": str(foc_conf.get("cpu_num", "1")),
+                "name": "CPU Num"},
+            "focusing.gpu_id": {
+                "type": "input",
+                "value": str(foc_conf.get("gpu_id", "0")),
+                "name": "GPU ID"
+            },
+
+            "line4": {"type": "line"},
+
+            "focusing.get_model": {
+                "type": "checkbox",
+                "value": foc_conf.get("get_model", False),
+                "name": "Get Model by Function (For Bacth)"
+            },
         })
+    def create_segmentation_group_(self):
+            # conf = self.config.get("segmentation", {})
+            conf = self.config.segmentation if hasattr(self.config,'segmentation') else {}
+            return self._create_group("Segmentation", {
+                "segmentation.method": {
+                    "type": "combo",
+                    "value": conf.get("method", "None"),
+                    "options": conf.get("method_list", []),
+                    "name": "Method"
+                },
+                "segmentation.gray_thresh": {"type": "input", "value": str(conf.get("gray_thresh", "127")), "name": "Gray Threshold"},
+                "segmentation.block_size": {"type": "input", "value": str(conf.get("block_size", "32")), "name": "Block Size"},
+                "segmentation.model_path": {"type": "input", "value": conf.get("model_path", ""), "name": "Model Path"},
+                "segmentation.model_name": {"type": "input", "value": conf.get("model_name", ""), "name": "Model Name"},
+            })
     def create_segmentation_group(self):
         # conf = self.config.get("segmentation", {})
         conf = self.config.segmentation if hasattr(self.config,'segmentation') else {}
@@ -2697,6 +2807,11 @@ class MainWindow(QMainWindow):
                 "type": "checkbox",
                 "value": conf.get("run_focusing", True),
                 "name": "Focusing"
+            },
+            "operation_options.run_pchip": {
+                "type": "checkbox",
+                "value": conf.get("run_pchip", False),
+                "name": "PCHIP Fast Focus"
             },
             "operation_options.run_segmentation": {
                 "type": "checkbox",
