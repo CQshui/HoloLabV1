@@ -129,8 +129,8 @@ class HoloConfig:
         'gpu_num'       : 1
     })
     focusing:               Dict[str, Any] = field(default_factory=lambda: {
-        'method'            : 'Multi_PCHIP_GPU',
-        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient', 'PCHIP', 'PCHIP_GPU', 'Multi_PCHIP', 'Multi_PCHIP_GPU'],
+        'method'            : 'AI',
+        'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient'],
         'yolo_model_path'   : r'E:\Projects\HoloLabV1\models/focusing/yolo_detection.pth',
         'rcf_model_path'    : r'E:\Projects\HoloLabV1\models/focusing/rcf_edge_detection.pth',
         'rcf_scale'         : 8,  # rcf所处理图像的缩放倍率，图像原尺寸要/scale
@@ -284,6 +284,7 @@ class HoloConfig:
         'run_spectrum'         : True,
         'run_reconstruction'   : True,
         'run_focusing'         : True,
+        'run_pchip'            : False,
         'run_segmentation'     : False,
         'run_identification'   : False,
         'run_phase'            : False,

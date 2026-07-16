@@ -158,7 +158,7 @@ class Focusing:
         self.stack           = np.stack(_reconstruction_list, axis=2).astype(np.float64) * 255  #(height, width, num)或 axis=-1
         print('2')
 
-        self.method         = config.focusing['method']
+        self.method         = kwargs.get('method', config.focusing['method'])
         self.device         = torch.device(config.focusing['device'])
         self.gpu_id         = config.focusing['gpu_id']
         self.cpu_num        = config.focusing['cpu_num']        # cpu线程数
@@ -180,26 +180,37 @@ class Focusing:
             # 检查**kwargs中是否传入了yoloModel参数
             self.yoloModel  = kwargs['yoloModel']
             self.rcfModel   = kwargs['rcfModel']
-        elif not Focusing._model_loaded and self.method in ['AI', 'AI_Wavelet', 'AI_Gradient']:
-            self.load_model()
-            Focusing._model_loaded = True
+
+        elif self.method in ['AI', 'AI_Wavelet', 'AI_Gradient']:
+            # AI 方法需要 YOLO + RCF 模型
+            if Focusing._yolo_model is None:
+                self.load_model()  # 同时加载 YOLO 和 RCF
+            else:
+                self.yoloModel = Focusing._yolo_model
+                self.yoloModel.net.to(self.device)
+                self.rcfModel = Focusing._rcf_model
+                if self.rcfModel is not None:
+                    self.rcfModel.to(self.device)
+
         elif self.method in ['PCHIP', 'PCHIP_GPU']:
-            # PCHIP 方法需要 RCF 模型（做边缘预测计算聚焦分数），但不需要 YOLO
+            # PCHIP 方法只需要 RCF 模型，不需要 YOLO
             self.yoloModel = None
-            if not Focusing._model_loaded:
+            if Focusing._rcf_model is None:
                 self.load_rcf_model()
-                Focusing._model_loaded = True
             else:
                 self.rcfModel = Focusing._rcf_model
                 if self.rcfModel is not None:
                     self.rcfModel.to(self.device)
+
+        elif self.method in ['Multi_PCHIP', 'Multi_PCHIP_GPU']:
+            # Multi_PCHIP 内部自行管理模型加载
+            self.yoloModel = None
+            self.rcfModel = None
+
         else:
-            self.yoloModel = Focusing._yolo_model
-            if self.yoloModel is not None:
-                self.yoloModel.net.to(self.device)
-            self.rcfModel = Focusing._rcf_model
-            if self.rcfModel is not None:
-                self.rcfModel.to(self.device)
+            # Wavelet / Gradient 等方法不需要模型
+            self.yoloModel = None
+            self.rcfModel = None
 
         '''保留原始对象用于修改'''
         self._hologram      = hologram

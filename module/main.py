@@ -158,9 +158,10 @@ class Holo_Processor(QObject):
             print('自聚焦结束')
 
         elif action_key == "pchip":
-            # PCHIP 快速自聚焦（同时包含重建 + 聚焦）
-            self.image_ready.emit("Focusing", {}, f"PCHIP Fast Focus: {self.config.focusing['method']}, On Going, Please wait ... ...")
-            worker_focusing = Focusing(hologram=self.hologram, config=self.config)
+            # PCHIP 快速自聚焦（独立于普通聚焦，不修改 focusing.method）
+            _pchip_method = self.config.fast_focus.get('method', 'PCHIP_GPU')
+            self.image_ready.emit("Focusing", {}, f"PCHIP Fast Focus: {_pchip_method}, On Going, Please wait ... ...")
+            worker_focusing = Focusing(hologram=self.hologram, config=self.config, method=_pchip_method)
             worker_focusing.run()
             self._show_focusing()
             print('PCHIP 快速自聚焦结束')
@@ -2359,12 +2360,12 @@ class MainWindow(QMainWindow):
         ff_conf = self.config.fast_focus if hasattr(self.config, 'fast_focus') else {}
         ffm_conf = self.config.fast_focus_multi if hasattr(self.config, 'fast_focus_multi') else {}
         foc_conf = self.config.focusing if hasattr(self.config, 'focusing') else {}
-        # Only show PCHIP-related methods
-        pchip_methods = [m for m in foc_conf.get("method_list", []) if 'PCHIP' in m.upper()]
+        # PCHIP methods from separate configs
+        pchip_methods = ff_conf.get("method_list", []) + ffm_conf.get("method_list", [])
         return self._create_group("PCHIP Fast Focus", {
-            "focusing.method": {
+            "fast_focus.method": {
                 "type": "combo",
-                "value": foc_conf.get("method", "None"),
+                "value": ff_conf.get("method", "PCHIP_GPU"),
                 "options": pchip_methods,
                 "name": "Method"
             },
