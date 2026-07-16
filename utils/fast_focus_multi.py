@@ -155,7 +155,13 @@ class MultiFocusPCHIP:
         self.z_array = np.linspace(self.z_start, self.z_end, self.z_num)
         self.z_list = self.z_array.tolist()
 
-        self.device = torch.device(config.focusing.get('device', 'cuda'))
+        # CPU 版本全程 CPU（角谱 numpy + YOLO/RCF 推理均在 CPU）；
+        # GPU 版本全程 GPU，强制 cuda，不读 config.focusing['device']，
+        # 避免用户为切 CPU 版而把 focusing.device 改成 cpu 时把 GPU 版也拖到 CPU。
+        if getattr(self, '_use_gpu', False):
+            self.device = torch.device('cuda')
+        else:
+            self.device = torch.device('cpu')
         self.gpu_id = config.focusing.get('gpu_id', 0)
         self.cpu_num = config.focusing.get('cpu_num', 1)
         self.rcf_scale = config.focusing.get('rcf_scale', 8)
@@ -209,20 +215,43 @@ class MultiFocusPCHIP:
 
     def _batch_reconstruct(self, z_values: List[float]) -> Dict[float, np.ndarray]:
         """
-        对一组 z 值做批量重建
-        返回 {z: 振幅图像(全尺寸)}
+        对一组 z 值做批量角谱重建（numpy 实现）
+        返回 {z: 振幅图像(缩放尺寸, 1/rcf_scale)}
+
+        注意：必须与 MultiFocusPCHIP_GPU._batch_reconstruct 数学等价 ——
+        频率轴用 fftfreq 构建，传递函数用菲涅尔近似 exp(j*2π/λ*z)*exp(-j*π*λ*z*f²)。
+        不能改用 Reconstruction_Angular_Spectrum_CPU，后者用 np.linspace 构建频率轴，
+        步长 1/((N-1)d) 与 fftfreq 的 1/(Nd) 不一致，导致传递函数与频谱频率错位、
+        重建失真（z 变化时重建图几乎不变），从而使 PCHIP 聚焦失败。
         """
-        # 使用 Reconstruction 类做单截面重建
-        from utils.reconstruction import Reconstruction
-        recon = Reconstruction(self._hologram, self._config)
-        recon.z_array = np.array(sorted(set(z_values)))
-        recon.z_list = recon.z_array.tolist()
-        recon.z_num = len(recon.z_array)
-        recon.Reconstruction_Angular_Spectrum_CPU()
+        scale = self.rcf_scale
+        M_full, N_full = self._hologram.spectrum.shape
+        M_crop = M_full // scale
+        N_crop = N_full // scale
+        M_start = (M_full - M_crop) // 2
+        N_start = (N_full - N_crop) // 2
+        spectrum_cropped = self._hologram.spectrum[
+            M_start:M_start + M_crop, N_start:N_start + N_crop
+        ]
+
+        pixel_size_scaled = self.pixel_size * scale
+        wavelength = self.wavelength
+
+        M, N = spectrum_cropped.shape
+        # 频率坐标（与 GPU 版一致：fftshift(fftfreq)）
+        fft_x = np.fft.fftshift(np.fft.fftfreq(N, d=pixel_size_scaled))
+        fft_y = np.fft.fftshift(np.fft.fftfreq(M, d=pixel_size_scaled))
+        fft_mesh_x, fft_mesh_y = np.meshgrid(fft_x, fft_y)
+        fft_squa = fft_mesh_x ** 2 + fft_mesh_y ** 2
 
         result = {}
-        for z, img in zip(recon.z_list, recon.reconstruction_list):
-            result[z] = np.abs(img)
+        for z in sorted(set(z_values)):
+            # 传递函数（菲涅尔近似，与 GPU 版逐项等价）
+            H = np.exp(1j * 2 * np.pi / wavelength * z) * \
+                np.exp(-1j * np.pi * wavelength * z * fft_squa)
+            A = H * spectrum_cropped
+            U = np.fft.ifft2(np.fft.ifftshift(A))
+            result[z] = np.abs(U)
         return result
 
     def _crop_particle(self, image: np.ndarray, bbox: Tuple[int, int, int, int],
@@ -582,6 +611,7 @@ class MultiFocusPCHIP_GPU(MultiFocusPCHIP):
     多颗粒 PCHIP 自聚焦（GPU 加速版）
     完全使用 PyTorch 进行批量角谱重建，避免 CuPy 与 PyTorch 的 CUDA 上下文冲突。
     """
+    _use_gpu = True
 
     def _batch_reconstruct(self, z_values: List[float]) -> Dict[float, np.ndarray]:
         """

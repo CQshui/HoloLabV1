@@ -61,12 +61,16 @@ class PeakFinder:
         初始采样点数因子
     scale : optional
         传递给 func 的额外参数
+    seed : int
+        随机种子，初始化时固定 np.random 状态，保证 CPU/GPU 采样序列一致、结果可复现
     """
 
     def __init__(self, func: Callable, lb: float = -0.00060, ub: float = 0.00060,
                  max_evals: int = 50, target: str = 'min',
                  precision_factor: float = 1.0, initial_points_factor: float = 1.0,
-                 scale=None):
+                 scale=None, seed: int = 42):
+        # 固定随机种子，保证 CPU/GPU 两次运行的 z 采样序列一致，结果可复现、可对比
+        np.random.seed(seed)
         self.func = func
         self.lb = lb
         self.ub = ub
@@ -79,6 +83,7 @@ class PeakFinder:
         self.precision_factor = precision_factor
         self.initial_points_factor = initial_points_factor
         self.scale = scale
+        self.seed = seed
         self.success = False  # 寻峰成功标志
 
     def evaluate(self, x: float) -> float:
@@ -370,6 +375,7 @@ class FastFocusPCHIP:
 
     _rcf_model_loaded = False
     _rcf_model = None
+    _use_gpu = False  # CPU 版全程 CPU；GPU 子类覆盖为 True
 
     def __init__(self, hologram: Hologram, config: HoloConfig,
                  rcf_model=None, device=None, k_size: int = 8):
@@ -389,11 +395,12 @@ class FastFocusPCHIP:
         self.initial_points_factor = config.fast_focus['initial_points_factor']
         self.k_size = k_size
 
-        # 设备
-        if device is None:
-            self.device = torch.device(config.focusing.get('device', 'cuda'))
+        # 设备：CPU 版全程 CPU，GPU 版强制 cuda，均不读 config.focusing['device']，
+        # 避免为切 CPU 版而改 focusing.device 时把 GPU 版也拖到 CPU。
+        if getattr(self, '_use_gpu', False):
+            self.device = torch.device('cuda')
         else:
-            self.device = device
+            self.device = torch.device('cpu')
 
         # RCF 模型加载
         if rcf_model is not None:
@@ -625,6 +632,7 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
     使用 CuPy 加速角谱法重建过程
     RCF 推理仍使用 PyTorch（已在 GPU 上）
     """
+    _use_gpu = True
 
     def _precompute_frequency(self):
         """预计算频域网格（GPU），做低频裁剪加速"""

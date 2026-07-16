@@ -339,8 +339,8 @@ class Focusing:
 
     def AutoFocusing_WaveLet_CPU(self):
         h, w, num_images = self.stack.shape
+        orig_h, orig_w = h, w
 
-        # 对 stack 做缩放加速处理
         scale = self.rcf_scale
         h_small, w_small = h // scale, w // scale
         stack_small = np.stack([
@@ -348,37 +348,23 @@ class Focusing:
             for i in range(num_images)
         ], axis=-1)
 
-        # 以下为小波拓展所需参数
         wavelet = 'db2'
         window_size = 5
-        fusion_mode = 'max'
         level = 3
 
         coeffs_list = []
-
-        # 遍历并提取每个图像（在缩小后的 stack 上操作）
         for i in range(num_images):
-            img = stack_small[:, :, i]
-            current_img = img.copy()
+            img = stack_small[:, :, i].copy()
 
-            # 图像预处理，确保尺寸合理
+            # 计算各维度需要的填充
             min_size = 2 ** (level + 1)
-            base_h = min(s for s in (h, w))
-            base_w = max(s for s in (h, w))
+            pad_h = (min_size - (h_small % min_size)) % min_size
+            pad_w = (min_size - (w_small % min_size)) % min_size
 
-            base_h = (base_h // min_size) * min_size
-            base_w = (base_w // min_size) * min_size
-
-            pad_h = (min_size - (base_h % min_size)) % min_size
-            pad_w = (min_size - (base_w % min_size)) % min_size
-
-            original_size, padding = (base_h, base_w), (pad_h, pad_w)
-
-            cropped = current_img[:base_h, :base_w]
-            padded = np.pad(cropped, ((0, pad_h), (0, pad_w)), mode='symmetric').astype(np.float32)
+            # 不裁剪，直接对称填充
+            padded = np.pad(img, ((0, pad_h), (0, pad_w)), mode='symmetric').astype(np.float32)
             current_img = padded
 
-            # 开始处理
             coeffs = []
             for _ in range(level):
                 cA, (cH, cV, cD) = pywt.dwt2(current_img, wavelet, mode='periodization')
@@ -387,31 +373,28 @@ class Focusing:
             coeffs.append(current_img)
             coeffs_list.append(coeffs)
 
-        # 改进低频融合：选择局部方差最大的低频系数
+        # 低频融合
         cA_list = [c[-1] for c in coeffs_list]
-        window_size_low = max(3, window_size // 2)  # 低频窗口尺寸适当减小
+        window_size_low = max(3, window_size // 2)
         var_maps = []
         for cA in cA_list:
             local_mean = uniform_filter(cA, size=window_size_low, mode='mirror')
             local_sq_mean = uniform_filter(cA ** 2, size=window_size_low, mode='mirror')
             var = local_sq_mean - local_mean ** 2
             var_maps.append(var)
-
         var_stack = np.stack(var_maps, axis=-1)
         max_indices = np.argmax(var_stack, axis=-1)
         fused_cA = np.take_along_axis(np.stack(cA_list, axis=-1), max_indices[..., None], axis=-1).squeeze()
         fused_coeffs = [fused_cA]
 
-        # 高频系数融合修正
-        def local_fusion(stack, mode=fusion_mode, w_size=window_size):
+        # 高频融合
+        def local_fusion(stack, w_size=window_size):
             if w_size == 1:
                 max_indices = np.argmax(np.abs(stack), axis=-1)
                 return np.take_along_axis(stack, max_indices[..., None], axis=-1).squeeze()
-
             energy = np.zeros_like(stack, dtype=np.float32)
             for n in range(stack.shape[-1]):
                 energy[..., n] = uniform_filter(np.abs(stack[..., n]), size=w_size, mode='mirror') * (w_size ** 2)
-
             max_indices = np.argmax(energy, axis=-1)
             return np.take_along_axis(stack, max_indices[..., None], axis=-1).squeeze()
 
@@ -419,65 +402,55 @@ class Focusing:
             all_cH = [c[l][0] for c in coeffs_list]
             all_cV = [c[l][1] for c in coeffs_list]
             all_cD = [c[l][2] for c in coeffs_list]
-
             stack_cH = np.stack(all_cH, axis=-1)
             stack_cV = np.stack(all_cV, axis=-1)
             stack_cD = np.stack(all_cD, axis=-1)
-
             fused_cH = local_fusion(stack_cH, w_size=window_size)
             fused_cV = local_fusion(stack_cV, w_size=window_size)
             fused_cD = local_fusion(stack_cD, w_size=window_size)
-
             fused_coeffs.insert(0, (fused_cH, fused_cV, fused_cD))
 
-        # 逆变换重建
         reconstructed = fused_coeffs[-1]
         for l in range(level):
             cH, cV, cD = fused_coeffs[len(fused_coeffs) - l - 2]
             reconstructed = pywt.idwt2((reconstructed, (cH, cV, cD)), wavelet, mode='periodization')
 
-        target_h, target_w = original_size[0] + padding[0], original_size[1] + padding[1]
-        reconstructed = reconstructed[:target_h, :target_w]
+        # 去除填充，恢复 h_small × w_small
+        reconstructed = reconstructed[:h_small, :w_small]
 
-        # 回归原有尺寸
-        reconstructed = cv2.resize(reconstructed, (w * scale, h * scale))
-        h, w = h * scale, w * scale  # 恢复为全尺寸
+        # ★ 恢复到原始全尺寸
+        reconstructed = cv2.resize(reconstructed, (orig_w, orig_h))
 
         self.focusing = np.clip(reconstructed, 0, 255).astype(np.uint8)
         return self.focusing
 
     def AutoFocusing_WaveLet_GPU(self):
         h, w, num_images = self.stack.shape
+        orig_h, orig_w = h, w  # ★ 保留原始全尺寸
 
-        # 对 stack 做缩放加速处理
+        # 缩放加速
         scale = self.rcf_scale
         h_small, w_small = h // scale, w // scale
         stack_small = np.stack([
             cv2.resize(self.stack[:, :, i], (w_small, h_small), interpolation=cv2.INTER_LINEAR)
             for i in range(num_images)
         ], axis=-1)
-        h, w = h_small, w_small
 
         wavelet = 'db2'
         window_size = 5
         level = 3
 
-        # 将数据转移到GPU
+        # 转为 GPU 张量
         stack_np = stack_small.astype(np.float32)
-        stack_tensor = torch.from_numpy(stack_np).permute(2, 0, 1).unsqueeze(1).to(self.device)  # (num_images, 1, h, w)
+        stack_tensor = torch.from_numpy(stack_np).permute(2, 0, 1).unsqueeze(1).to(self.device)  # (N,1,H_small,W_small)
 
-        # 预处理填充
+        # ★ 正确计算各维度所需的填充量（不再交换宽高）
         min_size = 2 ** (level + 1)
-        base_h = min(h, w)
-        base_w = max(h, w)
-        base_h = (base_h // min_size) * min_size
-        base_w = (base_w // min_size) * min_size
-        pad_h = (min_size - (base_h % min_size)) % min_size
-        pad_w = (min_size - (base_w % min_size)) % min_size
+        pad_h = (min_size - (h_small % min_size)) % min_size
+        pad_w = (min_size - (w_small % min_size)) % min_size
 
-        # 裁剪并对称填充
-        cropped = stack_tensor[:, :, :base_h, :base_w]
-        padded = F.pad(cropped, (0, pad_w, 0, pad_h), mode='reflect')
+        # 直接对称填充，不裁剪
+        padded = F.pad(stack_tensor, (0, pad_w, 0, pad_h), mode='reflect')  # (left,right,top,bottom)
 
         # 小波分解
         dwt = DWTForward(J=level, wave=wavelet, mode='periodization').to(self.device)
@@ -486,19 +459,15 @@ class Focusing:
         # 低频融合
         window_size_low = max(3, window_size // 2)
         pad_size = (window_size_low - 1) // 2
-
-        # 计算局部方差
         padded_yl = F.pad(yl, (pad_size,) * 4, mode='reflect')
         local_mean = F.avg_pool2d(padded_yl, window_size_low, stride=1)
         local_sq_mean = F.avg_pool2d(padded_yl ** 2, window_size_low, stride=1)
         var = local_sq_mean - local_mean ** 2
-
-        # 选择最大方差索引
         max_indices = torch.argmax(var, dim=0, keepdim=True)
         fused_cA = torch.gather(yl, 0, max_indices)
         fused_coeffs = [fused_cA]
 
-        # 高频融合函数
+        # 高频融合
         def fuse_high(coeff_stack, w_size):
             if w_size == 1:
                 return coeff_stack.max(dim=0, keepdim=True)[0]
@@ -508,32 +477,30 @@ class Focusing:
             max_indices = torch.argmax(energy, dim=0, keepdim=True)
             return torch.gather(coeff_stack, 0, max_indices)
 
-        # 逐层融合高频系数
         fused_yh = []
         for l in range(level):
-            current_yh = yh[l]  # 形状为 (num_images, 1, 3, h, w)
-            cH = current_yh[:, :, 0, :, :]
-            cV = current_yh[:, :, 1, :, :]
-            cD = current_yh[:, :, 2, :, :]
-
+            cH = yh[l][:, :, 0, :, :]
+            cV = yh[l][:, :, 1, :, :]
+            cD = yh[l][:, :, 2, :, :]
             fused_cH = fuse_high(cH, window_size)
             fused_cV = fuse_high(cV, window_size)
             fused_cD = fuse_high(cD, window_size)
-            # 合并三个高频分量到第三维度
             fused_high = torch.stack([fused_cH, fused_cV, fused_cD], dim=2)
             fused_yh.append(fused_high)
 
-        # 小波逆变换
+        # 逆变换
         idwt = DWTInverse(wave=wavelet, mode='periodization').to(self.device)
         reconstructed = idwt((fused_coeffs[-1], fused_yh))
 
-        # 后处理
-        result = reconstructed[:, :, :base_h + pad_h, :base_w + pad_w]
-        result = F.interpolate(result, size=(h, w), mode='bicubic', align_corners=False)
-        result = result.squeeze().cpu().numpy()
-        result = cv2.resize(result, (w, h))
-        # resize 回全尺寸
-        result = cv2.resize(result, (w * scale, h * scale))
+        # 去除填充部分，恢复到 h_small × w_small
+        reconstructed = reconstructed[:, :, :h_small, :w_small]
+
+        # 插值回小尺寸（如果逆变换后尺寸略有偏差，用 interpolate 保证）
+        reconstructed = F.interpolate(reconstructed, size=(h_small, w_small), mode='bicubic', align_corners=False)
+        result = reconstructed.squeeze().cpu().numpy()
+
+        # ★ 恢复到原始全尺寸（精确匹配 self.stack 的宽高）
+        result = cv2.resize(result, (orig_w, orig_h))
 
         self.focusing = np.clip(result, 0, 255).astype(np.uint8)
         return self.focusing
@@ -734,30 +701,29 @@ class Focusing:
         self.focusing = wavelet_processed
 
     def AutoFocusing_AI_CPU(self, get_position=False):
-        # 设置CPU并行计算
-        torch.set_num_threads(self.cpu_num)      # todo 改掉，用多进程而不是多线程
-        torch.backends.openmp.enabled = True
-        torch.backends.mkldnn.enabled = True  # 启用MKL-DNN加速
+        # 强制使用 CPU 设备
+        device = torch.device('cpu')
+        self.rcfModel.to(device)
+        self.rcfModel.eval()
 
-        # 颗粒子图拼接函数
+        # 设置 CPU 推理线程数
+        if hasattr(self, 'cpu_num') and self.cpu_num:
+            torch.set_num_threads(self.cpu_num)
+
         def create_square_mosaic(images, fill_value=128):
             """（保持不变）"""
             if not images:
                 return None
-
             heights = [img.shape[0] for img in images]
             widths = [img.shape[1] for img in images]
             max_height = max(heights)
             max_width = max(widths)
-
             num_images = len(images)
             num_rows = int(np.sqrt(num_images))
             num_cols = (num_images + num_rows - 1) // num_rows
-
             mosaic_height = num_rows * max_height
             mosaic_width = num_cols * max_width
             mosaic = np.full((mosaic_height, mosaic_width), fill_value, dtype=np.uint8)
-
             for idx, img in enumerate(images):
                 height, width = img.shape
                 row = idx // num_cols
@@ -765,36 +731,30 @@ class Focusing:
                 start_row = row * max_height
                 start_col = col * max_width
                 mosaic[start_row:start_row + height, start_col:start_col + width] = img
-
             return mosaic
 
-        focused_particles = []
-
-        # 颗粒追踪, 耗费19s
+        # 颗粒追踪
         mot_tracker = Sort(max_age=15, min_hits=3, iou_threshold=0.3, distance_threshold=30)
         tracker = Kalman_tracker(image_folder=None,
                                  output_folder=None,
                                  yolo_model=self.yoloModel,
                                  sort=mot_tracker,
                                  image_stack=self.stack,
-                                 device=self.device)
-
+                                 device=device)
         if get_position:
-            stacks, stacks_ori, names, positions = tracker.get_stacks(
-                get_position=get_position)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
+            stacks, stacks_ori, names, positions = tracker.get_stacks(get_position=get_position)
             self.focusing_xy = positions
         else:
             stacks, stacks_ori, names = tracker.get_stacks()
 
-        # 修改后的并行处理代码
-        processor = RCFProcessor(self.rcfModel, self.device, stacks, stacks_ori, rcf_scale=1,
+        processor = RCFProcessor(self.rcfModel, device, stacks, stacks_ori, rcf_scale=1,
                                  z_list=self._hologram.reconstruction_z)
 
-        # 使用 ProcessPoolExecutor.map 并行处理
-        with ProcessPoolExecutor(max_workers=self.cpu_num) as executor:
+        # ★ 使用线程池代替进程池，避免 GPU/CPU 跨设备错误
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.cpu_num if self.cpu_num else 4) as executor:
             results = list(executor.map(processor.process_stack, range(len(stacks))))
 
-        # 收集结果
         focused_particles = []
         focusing_zs = []
         for focused_img, focusing_z in results:
@@ -806,9 +766,7 @@ class Focusing:
         if get_position:
             return focused_particles, positions
         else:
-            # 拼接图
             self.focusing = create_square_mosaic(focused_particles)
-            # 单个颗粒
             for i in range(len(focused_particles)):
                 self.focusing_each[str(i)] = focused_particles[i]
 

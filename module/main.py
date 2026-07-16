@@ -599,6 +599,7 @@ class Holo_Controller(QObject):
         self.gui.btn_spectrum.clicked.connect(lambda: self.run_signal.emit("spectrum"))
         self.gui.btn_reconstruction.clicked.connect(lambda: self.run_signal.emit("reconstruction"))
         self.gui.btn_focusing.clicked.connect(lambda: self.run_signal.emit("focusing"))
+        self.gui.btn_pchip.clicked.connect(lambda: self.run_signal.emit("pchip"))
         self.gui.btn_segmentation.clicked.connect(lambda: self.run_signal.emit("segmentation"))
         self.gui.btn_identification.clicked.connect(lambda: self.run_signal.emit("identification"))
         self.gui.btn_phase.clicked.connect(lambda: self.run_signal.emit("phase"))
@@ -1629,6 +1630,7 @@ class MainWindow(QMainWindow):
         self.btn_spectrum       = QPushButton("Spectrum")
         self.btn_reconstruction = QPushButton("Reconstruction")
         self.btn_focusing       = QPushButton("Focusing")
+        self.btn_pchip          = QPushButton("PCHIP Fast Focus")
         self.btn_segmentation   = QPushButton("Segmentation")
         self.btn_identification = QPushButton("Identification")
         self.btn_phase          = QPushButton("Phase Analysis")
@@ -1884,6 +1886,7 @@ class MainWindow(QMainWindow):
         self.btn_spectrum       = QPushButton("Spectrum")
         self.btn_reconstruction = QPushButton("Reconstruction")
         self.btn_focusing       = QPushButton("Focusing")
+        self.btn_pchip          = QPushButton("PCHIP Fast Focus")
         self.btn_segmentation   = QPushButton("Segmentation")
         self.btn_identification = QPushButton("Identification")
         self.btn_phase          = QPushButton("Phase Analysis")
@@ -1893,9 +1896,9 @@ class MainWindow(QMainWindow):
 
         '''分组_____________________________________'''
         operation_buttons = [self.btn_open_image, self.btn_preprocessing, self.btn_spectrum,
-                             self.btn_reconstruction, self.btn_focusing, self.btn_segmentation,
-                             self.btn_identification, self.btn_phase, self.btn_polarization,
-                             self.btn_data_summary, self.btn_all_in_one]
+                             self.btn_reconstruction, self.btn_focusing, self.btn_pchip,
+                             self.btn_segmentation, self.btn_identification, self.btn_phase,
+                             self.btn_polarization, self.btn_data_summary, self.btn_all_in_one]
         for btn in operation_buttons:
             btn.clicked.connect(lambda _, b=btn: self.log_on_button_clicked(b.text()))
             btn.setMinimumHeight(30)
@@ -3461,6 +3464,7 @@ class MainWindow(QMainWindow):
         self.btn_spectrum.setEnabled(False)
         self.btn_reconstruction.setEnabled(False)
         self.btn_focusing.setEnabled(False)
+        self.btn_pchip.setEnabled(False)
         self.btn_segmentation.setEnabled(False)
         self.btn_identification.setEnabled(False)
         self.btn_phase.setEnabled(False)
@@ -3474,6 +3478,7 @@ class MainWindow(QMainWindow):
         self.btn_spectrum.setEnabled(True)
         self.btn_reconstruction.setEnabled(True)
         self.btn_focusing.setEnabled(True)
+        self.btn_pchip.setEnabled(True)
         self.btn_segmentation.setEnabled(True)
         self.btn_identification.setEnabled(True)
         self.btn_phase.setEnabled(True)
