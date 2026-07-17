@@ -18,7 +18,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 try:
-    import cupy as cp
+    # import cupy as cp
     import torch
 except Exception as e:
     print(f"[Module] {e}")
@@ -211,39 +211,81 @@ class Reconstruction_():
         self.reconstruction_list = results
 
     def _Free_Space_Propagation_GPU(self, spectrum, z, wavelength, fft_squa):
-        H = np.exp(1j * 2 * cp.pi / wavelength * z) * \
-            np.exp(-1j * cp.pi * wavelength * z * fft_squa)
+        # torch 版本：避免与 cupy 混用导致堆内存损坏 (0xC0000374)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        spectrum_t = torch.as_tensor(spectrum, device=device, dtype=torch.complex64)
+        fft_squa_t = torch.as_tensor(fft_squa, device=device, dtype=torch.float32)
 
-        A = H * spectrum
-        U = cp.fft.ifft2(np.fft.ifftshift(A))
+        H = torch.exp(1j * 2 * torch.pi / wavelength * z) * \
+            torch.exp(-1j * torch.pi * wavelength * z * fft_squa_t)
 
-        return cp.asnumpy(U)
+        A = H * spectrum_t
+        U = torch.fft.ifft2(torch.fft.ifftshift(A))
+
+        return U.detach().cpu().numpy()
+
+    # def _Free_Space_Propagation_GPU_cupy(self, spectrum, z, wavelength, fft_squa):
+    #     '''cupy 备份版本，保留以备需要时切换。
+    #     注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。'''
+    #     H = np.exp(1j * 2 * cp.pi / wavelength * z) * \
+    #         np.exp(-1j * cp.pi * wavelength * z * fft_squa)
+    #
+    #     A = H * spectrum
+    #     U = cp.fft.ifft2(np.fft.ifftshift(A))
+    #
+    #     return cp.asnumpy(U)
 
     def Reconstruction_Angular_Spectrum_GPU(self):
-        """GPU 加速的多截面重建（向量化版本）"""
-        import cupy as cp
+        """GPU 加速的多截面重建（PyTorch 向量化版本）"""
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # CuPy 数组
-        spectrum_gpu = cp.asarray(self.spectrum_cropped)
-        wavelength_gpu = cp.asarray(self.wavelength)
-        fft_mesh_x_gpu = cp.asarray(self.fft_mesh_x)
-        fft_mesh_y_gpu = cp.asarray(self.fft_mesh_y)
-        fft_squa_gpu = fft_mesh_x_gpu ** 2 + fft_mesh_y_gpu ** 2
+        # torch tensor
+        spectrum_t   = torch.as_tensor(self.spectrum_cropped, device=device, dtype=torch.complex64)
+        fft_mesh_x_t = torch.as_tensor(self.fft_mesh_x,       device=device, dtype=torch.float32)
+        fft_mesh_y_t = torch.as_tensor(self.fft_mesh_y,       device=device, dtype=torch.float32)
+        fft_squa_t   = fft_mesh_x_t ** 2 + fft_mesh_y_t ** 2
 
-        z_gpu = cp.asarray(self.z_array)  # (Z,)
+        z_t = torch.as_tensor(self.z_array, device=device, dtype=torch.float32)  # (Z,)
 
         # 向量化：z 扩展为 (Z, 1, 1) 与 (M, N) 广播 → (Z, M, N)
-        z_reshaped = z_gpu[:, cp.newaxis, cp.newaxis]  # (Z, 1, 1)
+        z_reshaped = z_t[:, None, None]  # (Z, 1, 1)
 
-        H = cp.exp(1j * 2 * cp.pi / wavelength_gpu * z_reshaped) * \
-            cp.exp(-1j * cp.pi * wavelength_gpu * z_reshaped * fft_squa_gpu)  # (Z, M, N)
+        wavelength = self.wavelength
+        H = torch.exp(1j * 2 * torch.pi / wavelength * z_reshaped) * \
+            torch.exp(-1j * torch.pi * wavelength * z_reshaped * fft_squa_t)  # (Z, M, N)
 
-        # 批量传播：spectrum_gpu (M, N) → (1, M, N) 广播到 (Z, M, N)
-        A = H * spectrum_gpu[cp.newaxis, :, :]  # (Z, M, N)
-        U = cp.fft.ifft2(cp.fft.ifftshift(A, axes=(1, 2)), axes=(1, 2))  # (Z, M, N)
+        # 批量传播：spectrum_t (M, N) → (1, M, N) 广播到 (Z, M, N)
+        A = H * spectrum_t[None, :, :]  # (Z, M, N)
+        U = torch.fft.ifft2(torch.fft.ifftshift(A, dim=(-2, -1)), dim=(-2, -1))  # (Z, M, N)
 
         # 转回 numpy list
-        self.reconstruction_list = [cp.asnumpy(U[i]) for i in range(len(self.z_array))]
+        U_cpu = U.detach().cpu().numpy()
+        self.reconstruction_list = [U_cpu[i] for i in range(len(self.z_array))]
+
+    # def Reconstruction_Angular_Spectrum_GPU_cupy(self):
+    #     '''cupy 备份版本，保留以备需要时切换。
+    #     注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。'''
+    #     # CuPy 数组
+    #     spectrum_gpu = cp.asarray(self.spectrum_cropped)
+    #     wavelength_gpu = cp.asarray(self.wavelength)
+    #     fft_mesh_x_gpu = cp.asarray(self.fft_mesh_x)
+    #     fft_mesh_y_gpu = cp.asarray(self.fft_mesh_y)
+    #     fft_squa_gpu = fft_mesh_x_gpu ** 2 + fft_mesh_y_gpu ** 2
+    #
+    #     z_gpu = cp.asarray(self.z_array)  # (Z,)
+    #
+    #     # 向量化：z 扩展为 (Z, 1, 1) 与 (M, N) 广播 → (Z, M, N)
+    #     z_reshaped = z_gpu[:, cp.newaxis, cp.newaxis]  # (Z, 1, 1)
+    #
+    #     H = cp.exp(1j * 2 * cp.pi / wavelength_gpu * z_reshaped) * \
+    #         cp.exp(-1j * cp.pi * wavelength_gpu * z_reshaped * fft_squa_gpu)  # (Z, M, N)
+    #
+    #     # 批量传播：spectrum_gpu (M, N) → (1, M, N) 广播到 (Z, M, N)
+    #     A = H * spectrum_gpu[cp.newaxis, :, :]  # (Z, M, N)
+    #     U = cp.fft.ifft2(cp.fft.ifftshift(A, axes=(1, 2)), axes=(1, 2))  # (Z, M, N)
+    #
+    #     # 转回 numpy list
+    #     self.reconstruction_list = [cp.asnumpy(U[i]) for i in range(len(self.z_array))]
 
     '''备份------------------------------------------------------------'''
     def _Free_Space_Propagation_CPU_(self, U0, distance, pad_factor=1):
@@ -309,41 +351,41 @@ class Reconstruction_():
 
         self.reconstruction_list = results
 
-    def _Free_Space_Propagation_GPU_(self, U0, distance, pad_factor=1):
-        wavelength = self.wavelength
-        z = distance
-        pixel_size = self.pixel_size
-
-        # 将输入转换为 cupy 数组
-        U0_cp = cp.asarray(U0)
-
-        M, N = U0.shape
-        M_pad, N_pad = int(M * pad_factor), int(N * pad_factor)
-
-        # 1. 零填充
-        U0_padded = cp.zeros((M_pad, N_pad), dtype=cp.complex64)
-        M_start, N_start = (M_pad - M) // 2, (N_pad - N) // 2
-        U0_padded[M_start:M_start + M, N_start:N_start + N] = U0_cp
-
-        # 2. 新的频域坐标（仍然用 numpy 计算，然后转 cp）
-        fft_x = cp.fft.fftshift(cp.fft.fftfreq(N_pad, d=pixel_size))
-        fft_y = cp.fft.fftshift(cp.fft.fftfreq(M_pad, d=pixel_size))
-        fft_mesh_x, fft_mesh_y = cp.meshgrid(fft_x, fft_y)
-
-        # 3. 传播函数
-        H = cp.exp(1j * 2 * cp.pi / wavelength * z) * \
-            cp.exp(-1j * cp.pi * wavelength * z * (fft_mesh_x ** 2 + fft_mesh_y ** 2))
-
-        # 4. 傅里叶传播（使用 cupy 的 fft）
-        A0 = cp.fft.fftshift(cp.fft.fft2(U0_padded))
-        A = H * A0
-        U_padded = cp.fft.ifft2(cp.fft.ifftshift(A))
-
-        # 5. 裁剪回原大小
-        U = U_padded[M_start:M_start + M, N_start:N_start + N]
-
-        # 转回 numpy 数组
-        return cp.asnumpy(U)
+    # def _Free_Space_Propagation_GPU_(self, U0, distance, pad_factor=1):
+    #     wavelength = self.wavelength
+    #     z = distance
+    #     pixel_size = self.pixel_size
+    #
+    #     # 将输入转换为 cupy 数组
+    #     U0_cp = cp.asarray(U0)
+    #
+    #     M, N = U0.shape
+    #     M_pad, N_pad = int(M * pad_factor), int(N * pad_factor)
+    #
+    #     # 1. 零填充
+    #     U0_padded = cp.zeros((M_pad, N_pad), dtype=cp.complex64)
+    #     M_start, N_start = (M_pad - M) // 2, (N_pad - N) // 2
+    #     U0_padded[M_start:M_start + M, N_start:N_start + N] = U0_cp
+    #
+    #     # 2. 新的频域坐标（仍然用 numpy 计算，然后转 cp）
+    #     fft_x = cp.fft.fftshift(cp.fft.fftfreq(N_pad, d=pixel_size))
+    #     fft_y = cp.fft.fftshift(cp.fft.fftfreq(M_pad, d=pixel_size))
+    #     fft_mesh_x, fft_mesh_y = cp.meshgrid(fft_x, fft_y)
+    #
+    #     # 3. 传播函数
+    #     H = cp.exp(1j * 2 * cp.pi / wavelength * z) * \
+    #         cp.exp(-1j * cp.pi * wavelength * z * (fft_mesh_x ** 2 + fft_mesh_y ** 2))
+    #
+    #     # 4. 傅里叶传播（使用 cupy 的 fft）
+    #     A0 = cp.fft.fftshift(cp.fft.fft2(U0_padded))
+    #     A = H * A0
+    #     U_padded = cp.fft.ifft2(cp.fft.ifftshift(A))
+    #
+    #     # 5. 裁剪回原大小
+    #     U = U_padded[M_start:M_start + M, N_start:N_start + N]
+    #
+    #     # 转回 numpy 数组
+    #     return cp.asnumpy(U)
     def Reconstruction_Angular_Spectrum_GPU_(self):
         U0 = np.fft.ifft2(np.fft.ifftshift(self.spectrum))
         for z in self.z_array:
