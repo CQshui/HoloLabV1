@@ -8,7 +8,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import RectangleSelector
 from scipy.ndimage import center_of_mass
-import cupy as cp
+# import cupy as cp
+import torch
 
 class Spectrum:
     def __init__(self, hologram=None, config=None):
@@ -208,6 +209,10 @@ class Spectrum_LiuJL():
         self.wave_length = config.image_info['wavelength'] * unit_nm
         self.pixel_size = config.image_info['pixel_size'] * unit_um
 
+        # GPU 设备：torch 加速使用，cupy 版本作为备份（见各 *_cupy 方法）
+        # 注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         self.spectrum_rect  = []
         self.spectrum_angle = []
 
@@ -236,25 +241,47 @@ class Spectrum_LiuJL():
 
     def get_hologram_spectrum(self):
         # 原来：np.fft.fft2，CPU，4508×4096 complex128 约 1.8s
-        # 现在：cp.fft.fft2，GPU，预计 < 30ms
-        holo_gpu = cp.asarray(self.hologram)
-        spec_gpu = cp.fft.fftshift(cp.fft.fft2(holo_gpu))
-        del holo_gpu
+        # 现在：torch.fft.fft2，GPU，避免与 cupy 混用导致堆内存损坏 (0xC0000374)
+        holo_t = torch.as_tensor(self.hologram, device=self.device).to(torch.complex64)
+        spec_t = torch.fft.fftshift(torch.fft.fft2(holo_t))
+        del holo_t
 
-        self.hologram_spectrum0    = spec_gpu          # 保持为 CuPy 数组，后续操作继续在 GPU
-        self.hologram_spectrum_raw = spec_gpu.copy()
+        self.hologram_spectrum0    = spec_t          # 保持为 torch tensor，后续操作继续在 GPU
+        self.hologram_spectrum_raw = spec_t.clone()
 
         # 可视化用的 log 幅值图，转回 CPU 供 cv2 使用
-        abs_gpu = cp.abs(spec_gpu)
-        log_gpu = cp.log1p(abs_gpu)
-        del abs_gpu
-        log_cpu = cp.asnumpy(log_gpu)
-        del log_gpu
+        abs_t = torch.abs(spec_t)
+        log_t = torch.log1p(abs_t)
+        del abs_t
+        log_cpu = log_t.detach().cpu().numpy()
+        del log_t
 
         self.hologram_spectrum1 = cv2.normalize(
             log_cpu, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
         )
         return self.hologram_spectrum0
+
+    # def get_hologram_spectrum_cupy(self):
+    #     '''cupy 备份版本：与 torch 版本功能等价，保留以备需要时切换。
+    #     注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。'''
+    #     holo_gpu = cp.asarray(self.hologram)
+    #     spec_gpu = cp.fft.fftshift(cp.fft.fft2(holo_gpu))
+    #     del holo_gpu
+    #
+    #     self.hologram_spectrum0    = spec_gpu          # 保持为 CuPy 数组，后续操作继续在 GPU
+    #     self.hologram_spectrum_raw = spec_gpu.copy()
+    #
+    #     # 可视化用的 log 幅值图，转回 CPU 供 cv2 使用
+    #     abs_gpu = cp.abs(spec_gpu)
+    #     log_gpu = cp.log1p(abs_gpu)
+    #     del abs_gpu
+    #     log_cpu = cp.asnumpy(log_gpu)
+    #     del log_gpu
+    #
+    #     self.hologram_spectrum1 = cv2.normalize(
+    #         log_cpu, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+    #     )
+    #     return self.hologram_spectrum0
 
     '''手动截取频谱图'''
 
@@ -337,8 +364,8 @@ class Spectrum_LiuJL():
             # delta_y = int(0.5*rectan_height+min_y-0.5*img_height)
             delta_x = int(0.5 * w_center + x_center - 0.5 * self.image_width)  #计算截取的频谱图的中心x与整幅图像的中心x的差值
             delta_y = int(0.5 * h_center + y_center - 0.5 * self.image_height)  #同理得y
-            self.hologram_spectrum0 = np.roll(self.hologram_spectrum0, -delta_x, axis=1)  #将截取的频谱图沿x移到整个图的x中心
-            self.hologram_spectrum0 = np.roll(self.hologram_spectrum0, -delta_y, axis=0)  #同理移y
+            self.hologram_spectrum0 = torch.roll(self.hologram_spectrum0, -delta_x, dims=1)  #将截取的频谱图沿x移到整个图的x中心
+            self.hologram_spectrum0 = torch.roll(self.hologram_spectrum0, -delta_y, dims=0)  #同理移y
             '''np.roll 会自动处理边界，滚动超出边界的元素会从另一端重新进入数组，避免了边界问题。'''
 
             '''计算离轴角'''
@@ -379,8 +406,8 @@ class Spectrum_LiuJL():
         # delta_y = int(0.5*rectan_height+min_y-0.5*img_height)
         delta_x = int(0.5 * self.rect_width + self.center_x - 0.5 * self.image_width)  # 计算截取的频谱图的中心x与整幅图像的中心x的差值
         delta_y = int(0.5 * self.rect_height + self.center_y - 0.5 * self.image_height)  # 同理得y
-        self.hologram_spectrum0 = np.roll(self.hologram_spectrum0, -delta_x, axis=1)  # 将截取的频谱图沿x移到整个图的x中心
-        self.hologram_spectrum0 = np.roll(self.hologram_spectrum0, -delta_y, axis=0)  # 同理移y
+        self.hologram_spectrum0 = torch.roll(self.hologram_spectrum0, -delta_x, dims=1)  # 将截取的频谱图沿x移到整个图的x中心
+        self.hologram_spectrum0 = torch.roll(self.hologram_spectrum0, -delta_y, dims=0)  # 同理移y
         '''np.roll 会自动处理边界，滚动超出边界的元素会从另一端重新进入数组，避免了边界问题。'''
 
         # '''计算离轴角'''
@@ -428,24 +455,79 @@ class Spectrum_LiuJL():
         self.center_y = int(rect_centery - 0.5 * self.rect_height)
 
         # 置零：保留 [y0:y1, x0:x1] 区域，其余全部置零
-        # hologram_spectrum0 是 CuPy 数组，直接在 GPU 上操作
+        # hologram_spectrum0 是 torch tensor，直接在 GPU 上操作
         x0 = int(rect_centerx - 0.5 * self.rect_width)
         x1 = int(rect_centerx + 0.5 * self.rect_width)
         y0 = int(rect_centery - 0.5 * self.rect_height)
         y1 = int(rect_centery + 0.5 * self.rect_height)
 
-        mask_gpu = cp.zeros_like(self.hologram_spectrum0)
-        mask_gpu[y0:y1, x0:x1] = self.hologram_spectrum0[y0:y1, x0:x1]
-        self.hologram_spectrum0 = mask_gpu
-        del mask_gpu
+        mask_t = torch.zeros_like(self.hologram_spectrum0)
+        mask_t[y0:y1, x0:x1] = self.hologram_spectrum0[y0:y1, x0:x1]
+        self.hologram_spectrum0 = mask_t
+        del mask_t
 
-        # roll：cp.roll 在 GPU 上完成，预计 < 10ms
+        # roll：torch.roll 在 GPU 上完成
         delta_x = int(rect_centerx - 0.5 * self.image_width)
         delta_y = int(rect_centery - 0.5 * self.image_height)
-        self.hologram_spectrum0 = cp.roll(self.hologram_spectrum0, -delta_x, axis=1)
-        self.hologram_spectrum0 = cp.roll(self.hologram_spectrum0, -delta_y, axis=0)
+        self.hologram_spectrum0 = torch.roll(self.hologram_spectrum0, -delta_x, dims=1)
+        self.hologram_spectrum0 = torch.roll(self.hologram_spectrum0, -delta_y, dims=0)
 
         return self.hologram_spectrum0
+
+    # def Get_Spectrum_Auto_Define_cupy(self):
+    #     '''cupy 备份版本，保留以备需要时切换。
+    #     注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。'''
+    #     self.get_hologram_spectrum_cupy()
+    #
+    #     # contour 检测在 CPU 上跑（hologram_spectrum1 已是 numpy uint8，不变）
+    #     img = self.hologram_spectrum1.copy()
+    #     img[int(0.5 * self.image_height - 0.5 * self.center_masklen):int(
+    #         0.5 * self.image_height + 0.5 * self.center_masklen),
+    #     int(0.5 * self.image_width - 0.5 * self.center_masklen):int(
+    #         0.5 * self.image_width + 0.5 * self.center_masklen)] = 0
+    #
+    #     _, binary_image = cv2.threshold(img, self.threshold, 255, cv2.THRESH_BINARY)
+    #     binary_image_blurred = cv2.GaussianBlur(binary_image, (1, 1), 50)
+    #     contours, _ = cv2.findContours(binary_image_blurred, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #
+    #     counter_x, counter_y, counter_w, counter_h = [], [], [], []
+    #     for contour in contours:
+    #         x, y, w, h = cv2.boundingRect(contour)
+    #         counter_x.append(x)
+    #         counter_y.append(y)
+    #         counter_w.append(w)
+    #         counter_h.append(h)
+    #
+    #     max_index = counter_w.index(max(counter_w))
+    #     x_center = counter_x[max_index]
+    #     y_center = counter_y[max_index]
+    #     w_center = counter_w[max_index]
+    #     h_center = counter_h[max_index]
+    #
+    #     rect_centerx = x_center + 0.5 * w_center
+    #     rect_centery = y_center + 0.5 * h_center
+    #     self.center_x = int(rect_centerx - 0.5 * self.rect_width)
+    #     self.center_y = int(rect_centery - 0.5 * self.rect_height)
+    #
+    #     # 置零：保留 [y0:y1, x0:x1] 区域，其余全部置零
+    #     # hologram_spectrum0 是 CuPy 数组，直接在 GPU 上操作
+    #     x0 = int(rect_centerx - 0.5 * self.rect_width)
+    #     x1 = int(rect_centerx + 0.5 * self.rect_width)
+    #     y0 = int(rect_centery - 0.5 * self.rect_height)
+    #     y1 = int(rect_centery + 0.5 * self.rect_height)
+    #
+    #     mask_gpu = cp.zeros_like(self.hologram_spectrum0)
+    #     mask_gpu[y0:y1, x0:x1] = self.hologram_spectrum0[y0:y1, x0:x1]
+    #     self.hologram_spectrum0 = mask_gpu
+    #     del mask_gpu
+    #
+    #     # roll：cp.roll 在 GPU 上完成，预计 < 10ms
+    #     delta_x = int(rect_centerx - 0.5 * self.image_width)
+    #     delta_y = int(rect_centery - 0.5 * self.image_height)
+    #     self.hologram_spectrum0 = cp.roll(self.hologram_spectrum0, -delta_x, axis=1)
+    #     self.hologram_spectrum0 = cp.roll(self.hologram_spectrum0, -delta_y, axis=0)
+    #
+    #     return self.hologram_spectrum0
 
 if __name__ == '__main__':
     print('Utils Spectrum Module', end='\n\n')
