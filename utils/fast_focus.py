@@ -629,16 +629,14 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
     """
     基于 PCHIP 的快速自聚焦类（GPU 加速版）
 
-    使用 CuPy 加速角谱法重建过程
-    RCF 推理仍使用 PyTorch（已在 GPU 上）
+    使用 PyTorch 加速角谱法重建过程，RCF 推理同样使用 PyTorch。
+    不再使用 CuPy，避免与 PyTorch 混用导致堆内存损坏 (0xC0000374)。
+    CuPy 版本见下方注释备份。
     """
     _use_gpu = True
 
     def _precompute_frequency(self):
-        """预计算频域网格（GPU），做低频裁剪加速"""
-        import cupy as cp
-
-        self.cp = cp
+        """预计算频域网格（GPU），做低频裁剪加速。torch 版本。"""
         scale = self.k_size
         M_full, N_full = self.spectrum.shape
         M_crop = M_full // scale
@@ -648,34 +646,79 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
 
         # 频谱裁剪 + 移到 GPU
         spectrum_cropped = self.spectrum[M_start:M_start + M_crop, N_start:N_start + N_crop]
-        self.spectrum_gpu = cp.asarray(spectrum_cropped)
-        self.wavefront_gpu = cp.fft.ifft2(cp.fft.ifftshift(self.spectrum_gpu))
+        self.spectrum_gpu = torch.as_tensor(spectrum_cropped, device=self.device, dtype=torch.complex64)
+        self.wavefront_gpu = torch.fft.ifft2(torch.fft.ifftshift(self.spectrum_gpu))
 
         self.pixel_size_scaled = self.pixel_size * scale
 
         M, N = self.wavefront_gpu.shape
-        fft_x = cp.fft.fftshift(cp.fft.fftfreq(N, d=self.pixel_size_scaled))
-        fft_y = cp.fft.fftshift(cp.fft.fftfreq(M, d=self.pixel_size_scaled))
-        fft_mesh_x, fft_mesh_y = cp.meshgrid(fft_x, fft_y)
+        fft_x = torch.fft.fftshift(torch.fft.fftfreq(N, d=self.pixel_size_scaled, device=self.device))
+        fft_y = torch.fft.fftshift(torch.fft.fftfreq(M, d=self.pixel_size_scaled, device=self.device))
+        # cupy.meshgrid 默认 'xy' 索引，torch 需显式指定以保持一致
+        fft_mesh_x, fft_mesh_y = torch.meshgrid(fft_x, fft_y, indexing='xy')
         self.fft_squa_gpu = fft_mesh_x ** 2 + fft_mesh_y ** 2
-
-        self.wavelength_gpu = cp.asarray(self.wavelength)
 
         # 保存全尺寸信息用于最终输出
         self._M_full = M_full
         self._N_full = N_full
 
     def _angular_spectrum_propagate(self, z: float) -> np.ndarray:
-        """GPU 加速的单截面重建"""
-        cp = self.cp
-
-        H = cp.exp(1j * 2 * cp.pi / self.wavelength_gpu * z) * \
-            cp.exp(-1j * cp.pi * self.wavelength_gpu * z * self.fft_squa_gpu)
+        """GPU 加速的单截面重建（torch 版本）"""
+        wavelength = self.wavelength
+        # 传播函数（角谱传递函数）：exp(1j*(2π/λ*z - π*λ*z*f²))
+        H = torch.exp(1j * (2 * torch.pi / wavelength * z
+                            - torch.pi * wavelength * z * self.fft_squa_gpu))
 
         A = H * self.spectrum_gpu
-        U = cp.fft.ifft2(cp.fft.ifftshift(A))
+        U = torch.fft.ifft2(torch.fft.ifftshift(A))
 
-        return cp.asnumpy(cp.abs(U))
+        return torch.abs(U).detach().cpu().numpy()
+
+    # '''---------------- CuPy 备份版本（保留以备需要时切换）----------------
+    # 注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。
+    # def _precompute_frequency(self):
+    #     """预计算频域网格（GPU），做低频裁剪加速"""
+    #     import cupy as cp
+    #
+    #     self.cp = cp
+    #     scale = self.k_size
+    #     M_full, N_full = self.spectrum.shape
+    #     M_crop = M_full // scale
+    #     N_crop = N_full // scale
+    #     M_start = (M_full - M_crop) // 2
+    #     N_start = (N_full - N_crop) // 2
+    #
+    #     # 频谱裁剪 + 移到 GPU
+    #     spectrum_cropped = self.spectrum[M_start:M_start + M_crop, N_start:N_start + N_crop]
+    #     self.spectrum_gpu = cp.asarray(spectrum_cropped)
+    #     self.wavefront_gpu = cp.fft.ifft2(cp.fft.ifftshift(self.spectrum_gpu))
+    #
+    #     self.pixel_size_scaled = self.pixel_size * scale
+    #
+    #     M, N = self.wavefront_gpu.shape
+    #     fft_x = cp.fft.fftshift(cp.fft.fftfreq(N, d=self.pixel_size_scaled))
+    #     fft_y = cp.fft.fftshift(cp.fft.fftfreq(M, d=self.pixel_size_scaled))
+    #     fft_mesh_x, fft_mesh_y = cp.meshgrid(fft_x, fft_y)
+    #     self.fft_squa_gpu = fft_mesh_x ** 2 + fft_mesh_y ** 2
+    #
+    #     self.wavelength_gpu = cp.asarray(self.wavelength)
+    #
+    #     # 保存全尺寸信息用于最终输出
+    #     self._M_full = M_full
+    #     self._N_full = N_full
+    #
+    # def _angular_spectrum_propagate(self, z: float) -> np.ndarray:
+    #     """GPU 加速的单截面重建"""
+    #     cp = self.cp
+    #
+    #     H = cp.exp(1j * 2 * cp.pi / self.wavelength_gpu * z) * \
+    #         cp.exp(-1j * cp.pi * self.wavelength_gpu * z * self.fft_squa_gpu)
+    #
+    #     A = H * self.spectrum_gpu
+    #     U = cp.fft.ifft2(cp.fft.ifftshift(A))
+    #
+    #     return cp.asnumpy(cp.abs(U))
+    # -------------------------------------------------------------------'''
 
     def _rcf_predict_single(self, amplitude: np.ndarray) -> float:
         """RCF 边缘预测（已在 GPU 上，与 CPU 版相同）"""
