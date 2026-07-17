@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 try:
-    import cupy as cp
+    # import cupy as cp
     import torch
 except Exception as e:
     print(f"[Module] {e}")
@@ -151,11 +151,14 @@ class Polarization_():
         if self._I0 is None:  # 任意一个为None即可判断
             raise RuntimeError("在计算偏振参数之前必须先拆分图像。")
 
-        # 将 NumPy 数组（可能是 uint8）转换为 float32 以进行精确计算，然后移至 CuPy
-        I0_f = cp.asarray(self._I0.astype(np.float32))
-        I45_f = cp.asarray(self._I45.astype(np.float32))
-        I90_f = cp.asarray(self._I90.astype(np.float32))
-        I135_f = cp.asarray(self._I135.astype(np.float32))
+        # torch 设备：有 CUDA 用 GPU，否则 CPU
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # 将 NumPy 数组（可能是 uint8）转换为 float32 以进行精确计算，然后移至 torch
+        I0_f = torch.as_tensor(self._I0.astype(np.float32), device=device)
+        I45_f = torch.as_tensor(self._I45.astype(np.float32), device=device)
+        I90_f = torch.as_tensor(self._I90.astype(np.float32), device=device)
+        I135_f = torch.as_tensor(self._I135.astype(np.float32), device=device)
 
         # 计算斯托克斯参数
         S0_calc = I0_f + I90_f
@@ -163,22 +166,22 @@ class Polarization_():
         S2_calc = I45_f - I135_f
 
         # 幅度信息（S1 和 S2 的模）
-        total_amp_calc = cp.sqrt(S1_calc ** 2 + S2_calc ** 2)
+        total_amp_calc = torch.sqrt(S1_calc ** 2 + S2_calc ** 2)
 
         # 计算偏振度 DoLP（归一化并转换为灰度图像）
         epsilon = 1e-10
-        DoLP_calc = cp.sqrt(S1_calc ** 2 + S2_calc ** 2) / (S0_calc + epsilon)
-        DoLP_calc = cp.clip(DoLP_calc, 0, 1)  # DoLP 范围在 0 到 1
-        DoLP_gray = (DoLP_calc * 255).astype(cp.uint8)
+        DoLP_calc = torch.sqrt(S1_calc ** 2 + S2_calc ** 2) / (S0_calc + epsilon)
+        DoLP_calc = torch.clamp(DoLP_calc, 0, 1)  # DoLP 范围在 0 到 1
+        DoLP_gray = (DoLP_calc * 255).to(torch.uint8)
 
         # 计算偏振角 AoP（AoP ∈ [-π/2, π/2]，并归一化为 0~255）
-        AoP_rad = 0.5 * cp.arctan2(S2_calc, S1_calc + epsilon)  # AoP 范围在 -pi/2 到 pi/2
+        AoP_rad = 0.5 * torch.arctan2(S2_calc, S1_calc + epsilon)  # AoP 范围在 -pi/2 到 pi/2
         # 将 AoP 从 [-π/2, π/2] 映射到 [0, 1] 区间
-        AoP_norm = (AoP_rad + (cp.pi / 2)) / cp.pi
+        AoP_norm = (AoP_rad + (torch.pi / 2)) / torch.pi
         # 转成 0–255 uint8 图像
-        AoP_gray = (AoP_norm * 255).astype(cp.uint8)
+        AoP_gray = (AoP_norm * 255).to(torch.uint8)
 
-        # 将计算结果（仍为 CuPy 数组）赋值给内部变量
+        # 将计算结果（仍为 torch tensor）赋值给内部变量
         self._S0 = S0_calc
         self._S1 = S1_calc
         self._S2 = S2_calc
@@ -186,19 +189,77 @@ class Polarization_():
         self._AoP = AoP_gray
         self._total_amp = total_amp_calc
 
-        # 将 CuPy 数组转回 NumPy 数组以便赋值给 hologram (假设 hologram 属性是 NumPy)
-        self._I0 = cp.asnumpy(I0_f.astype(self._I0.dtype))
-        self._I45 = cp.asnumpy(I45_f.astype(self._I45.dtype))
-        self._I90 = cp.asnumpy(I90_f.astype(self._I90.dtype))
-        self._I135 = cp.asnumpy(I135_f.astype(self._I135.dtype))
+        # 将 torch tensor 转回 NumPy 数组以便赋值给 hologram (假设 hologram 属性是 NumPy)
+        self._I0 = I0_f.to(self._I0.dtype).cpu().numpy()
+        self._I45 = I45_f.to(self._I45.dtype).cpu().numpy()
+        self._I90 = I90_f.to(self._I90.dtype).cpu().numpy()
+        self._I135 = I135_f.to(self._I135.dtype).cpu().numpy()
 
-        self._S0 = cp.asnumpy(self._S0)
-        self._S1 = cp.asnumpy(self._S1)
-        self._S2 = cp.asnumpy(self._S2)
-        self._total_amp = cp.asnumpy(self._total_amp)
-        self._DoLP = cp.asnumpy(self._DoLP)
-        self._AoP = cp.asnumpy(self._AoP)
+        self._S0 = self._S0.cpu().numpy()
+        self._S1 = self._S1.cpu().numpy()
+        self._S2 = self._S2.cpu().numpy()
+        self._total_amp = self._total_amp.cpu().numpy()
+        self._DoLP = self._DoLP.cpu().numpy()
+        self._AoP = self._AoP.cpu().numpy()
         print("偏振参数计算完成。")
+
+    # '''---------------- CuPy 备份版本（保留以备需要时切换）----------------
+    # 注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。
+    # def _calculate_polarization(self):
+    #     """计算斯托克斯参数与偏振参数（含归一化和数据转换）"""
+    #     # 确保子图已生成
+    #     if self._I0 is None:  # 任意一个为None即可判断
+    #         raise RuntimeError("在计算偏振参数之前必须先拆分图像。")
+    #
+    #     # 将 NumPy 数组（可能是 uint8）转换为 float32 以进行精确计算，然后移至 CuPy
+    #     I0_f = cp.asarray(self._I0.astype(np.float32))
+    #     I45_f = cp.asarray(self._I45.astype(np.float32))
+    #     I90_f = cp.asarray(self._I90.astype(np.float32))
+    #     I135_f = cp.asarray(self._I135.astype(np.float32))
+    #
+    #     # 计算斯托克斯参数
+    #     S0_calc = I0_f + I90_f
+    #     S1_calc = I0_f - I90_f
+    #     S2_calc = I45_f - I135_f
+    #
+    #     # 幅度信息（S1 和 S2 的模）
+    #     total_amp_calc = cp.sqrt(S1_calc ** 2 + S2_calc ** 2)
+    #
+    #     # 计算偏振度 DoLP（归一化并转换为灰度图像）
+    #     epsilon = 1e-10
+    #     DoLP_calc = cp.sqrt(S1_calc ** 2 + S2_calc ** 2) / (S0_calc + epsilon)
+    #     DoLP_calc = cp.clip(DoLP_calc, 0, 1)  # DoLP 范围在 0 到 1
+    #     DoLP_gray = (DoLP_calc * 255).astype(cp.uint8)
+    #
+    #     # 计算偏振角 AoP（AoP ∈ [-π/2, π/2]，并归一化为 0~255）
+    #     AoP_rad = 0.5 * cp.arctan2(S2_calc, S1_calc + epsilon)  # AoP 范围在 -pi/2 到 pi/2
+    #     # 将 AoP 从 [-π/2, π/2] 映射到 [0, 1] 区间
+    #     AoP_norm = (AoP_rad + (cp.pi / 2)) / cp.pi
+    #     # 转成 0–255 uint8 图像
+    #     AoP_gray = (AoP_norm * 255).astype(cp.uint8)
+    #
+    #     # 将计算结果（仍为 CuPy 数组）赋值给内部变量
+    #     self._S0 = S0_calc
+    #     self._S1 = S1_calc
+    #     self._S2 = S2_calc
+    #     self._DoLP = DoLP_gray
+    #     self._AoP = AoP_gray
+    #     self._total_amp = total_amp_calc
+    #
+    #     # 将 CuPy 数组转回 NumPy 数组以便赋值给 hologram (假设 hologram 属性是 NumPy)
+    #     self._I0 = cp.asnumpy(I0_f.astype(self._I0.dtype))
+    #     self._I45 = cp.asnumpy(I45_f.astype(self._I45.dtype))
+    #     self._I90 = cp.asnumpy(I90_f.astype(self._I90.dtype))
+    #     self._I135 = cp.asnumpy(I135_f.astype(self._I135.dtype))
+    #
+    #     self._S0 = cp.asnumpy(self._S0)
+    #     self._S1 = cp.asnumpy(self._S1)
+    #     self._S2 = cp.asnumpy(self._S2)
+    #     self._total_amp = cp.asnumpy(self._total_amp)
+    #     self._DoLP = cp.asnumpy(self._DoLP)
+    #     self._AoP = cp.asnumpy(self._AoP)
+    #     print("偏振参数计算完成。")
+    # -------------------------------------------------------------------'''
 
 class Polarization():
     def __init__(self, hologram: Hologram, config: HoloConfig):
@@ -354,13 +415,16 @@ class Polarization():
         self._config.image_info['pixel_num_y']  = self.image_width
 
     def _calculate_polarization_gpu(self):
-        """计算斯托克斯参数与偏振参数（含归一化和数据转换）"""
+        """计算斯托克斯参数与偏振参数（含归一化和数据转换）torch GPU 版本"""
 
-        # 将 NumPy 数组（可能是 uint8）转换为 float32 以进行精确计算，然后移至 CuPy
-        I0_f    = cp.asarray(self._I0.astype(np.float32))
-        I45_f   = cp.asarray(self._I45.astype(np.float32))
-        I90_f   = cp.asarray(self._I90.astype(np.float32))
-        I135_f  = cp.asarray(self._I135.astype(np.float32))
+        # torch 设备：有 CUDA 用 GPU，否则 CPU
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # 将 NumPy 数组（可能是 uint8）转换为 float32 以进行精确计算，然后移至 torch
+        I0_f    = torch.as_tensor(self._I0.astype(np.float32), device=device)
+        I45_f   = torch.as_tensor(self._I45.astype(np.float32), device=device)
+        I90_f   = torch.as_tensor(self._I90.astype(np.float32), device=device)
+        I135_f  = torch.as_tensor(self._I135.astype(np.float32), device=device)
 
         # 计算斯托克斯参数
         S0_calc = I0_f + I90_f
@@ -368,20 +432,20 @@ class Polarization():
         S2_calc = I45_f - I135_f
 
         # 幅度信息（S1 和 S2 的模）
-        total_amp_calc = cp.sqrt(S1_calc ** 2 + S2_calc ** 2)
+        total_amp_calc = torch.sqrt(S1_calc ** 2 + S2_calc ** 2)
 
         # 计算偏振度 DoLP（归一化并转换为灰度图像）
         epsilon     = 1e-10
-        DoLP_calc   = cp.sqrt(S1_calc ** 2 + S2_calc ** 2) / (S0_calc + epsilon)
-        DoLP_calc   = cp.clip(DoLP_calc, 0, 1)  # DoLP 范围在 0 到 1
-        DoLP_gray   = (DoLP_calc * 255).astype(cp.uint8)
+        DoLP_calc   = torch.sqrt(S1_calc ** 2 + S2_calc ** 2) / (S0_calc + epsilon)
+        DoLP_calc   = torch.clamp(DoLP_calc, 0, 1)  # DoLP 范围在 0 到 1
+        DoLP_gray   = (DoLP_calc * 255).to(torch.uint8)
 
         # 计算偏振角 AoP（AoP ∈ [-π/2, π/2]，并归一化为 0~255）
-        AoP_rad = 0.5 * cp.arctan2(S2_calc, S1_calc + epsilon)  # AoP 范围在 -pi/2 到 pi/2
+        AoP_rad = 0.5 * torch.arctan2(S2_calc, S1_calc + epsilon)  # AoP 范围在 -pi/2 到 pi/2
         # 将 AoP 从 [-π/2, π/2] 映射到 [0, 1] 区间
-        AoP_norm = (AoP_rad + (cp.pi / 2)) / cp.pi
+        AoP_norm = (AoP_rad + (torch.pi / 2)) / torch.pi
         # 转成 0–255 uint8 图像
-        AoP_gray = (AoP_norm * 255).astype(cp.uint8)
+        AoP_gray = (AoP_norm * 255).to(torch.uint8)
 
         self._S0    = S0_calc
         self._S1    = S1_calc
@@ -390,18 +454,71 @@ class Polarization():
         self._AoP   = AoP_gray
         self._total_amp = total_amp_calc
 
-        # 将 CuPy 数组转回 NumPy 数组以便赋值给 hologram (假设 hologram 属性是 NumPy)
-        self._I0        = cp.asnumpy(I0_f.astype(self._I0.dtype))
-        self._I45       = cp.asnumpy(I45_f.astype(self._I45.dtype))
-        self._I90       = cp.asnumpy(I90_f.astype(self._I90.dtype))
-        self._I135      = cp.asnumpy(I135_f.astype(self._I135.dtype))
+        # 将 torch tensor 转回 NumPy 数组以便赋值给 hologram (假设 hologram 属性是 NumPy)
+        self._I0        = I0_f.to(self._I0.dtype).cpu().numpy()
+        self._I45       = I45_f.to(self._I45.dtype).cpu().numpy()
+        self._I90       = I90_f.to(self._I90.dtype).cpu().numpy()
+        self._I135      = I135_f.to(self._I135.dtype).cpu().numpy()
 
-        self._S0        = cp.asnumpy(self._S0)
-        self._S1        = cp.asnumpy(self._S1)
-        self._S2        = cp.asnumpy(self._S2)
-        self._total_amp = cp.asnumpy(self._total_amp)
-        self._DoLP      = cp.asnumpy(self._DoLP)
-        self._AoP       = cp.asnumpy(self._AoP)
+        self._S0        = self._S0.cpu().numpy()
+        self._S1        = self._S1.cpu().numpy()
+        self._S2        = self._S2.cpu().numpy()
+        self._total_amp = self._total_amp.cpu().numpy()
+        self._DoLP      = self._DoLP.cpu().numpy()
+        self._AoP       = self._AoP.cpu().numpy()
+
+    # '''---------------- CuPy 备份版本（保留以备需要时切换）----------------
+    # 注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。
+    # def _calculate_polarization_gpu(self):
+    #     """计算斯托克斯参数与偏振参数（含归一化和数据转换）"""
+    #
+    #     # 将 NumPy 数组（可能是 uint8）转换为 float32 以进行精确计算，然后移至 CuPy
+    #     I0_f    = cp.asarray(self._I0.astype(np.float32))
+    #     I45_f   = cp.asarray(self._I45.astype(np.float32))
+    #     I90_f   = cp.asarray(self._I90.astype(np.float32))
+    #     I135_f  = cp.asarray(self._I135.astype(np.float32))
+    #
+    #     # 计算斯托克斯参数
+    #     S0_calc = I0_f + I90_f
+    #     S1_calc = I0_f - I90_f
+    #     S2_calc = I45_f - I135_f
+    #
+    #     # 幅度信息（S1 和 S2 的模）
+    #     total_amp_calc = cp.sqrt(S1_calc ** 2 + S2_calc ** 2)
+    #
+    #     # 计算偏振度 DoLP（归一化并转换为灰度图像）
+    #     epsilon     = 1e-10
+    #     DoLP_calc   = cp.sqrt(S1_calc ** 2 + S2_calc ** 2) / (S0_calc + epsilon)
+    #     DoLP_calc   = cp.clip(DoLP_calc, 0, 1)  # DoLP 范围在 0 到 1
+    #     DoLP_gray   = (DoLP_calc * 255).astype(cp.uint8)
+    #
+    #     # 计算偏振角 AoP（AoP ∈ [-π/2, π/2]，并归一化为 0~255）
+    #     AoP_rad = 0.5 * cp.arctan2(S2_calc, S1_calc + epsilon)  # AoP 范围在 -pi/2 到 pi/2
+    #     # 将 AoP 从 [-π/2, π/2] 映射到 [0, 1] 区间
+    #     AoP_norm = (AoP_rad + (cp.pi / 2)) / cp.pi
+    #     # 转成 0–255 uint8 图像
+    #     AoP_gray = (AoP_norm * 255).astype(cp.uint8)
+    #
+    #     self._S0    = S0_calc
+    #     self._S1    = S1_calc
+    #     self._S2    = S2_calc
+    #     self._DoLP  = DoLP_gray
+    #     self._AoP   = AoP_gray
+    #     self._total_amp = total_amp_calc
+    #
+    #     # 将 CuPy 数组转回 NumPy 数组以便赋值给 hologram (假设 hologram 属性是 NumPy)
+    #     self._I0        = cp.asnumpy(I0_f.astype(self._I0.dtype))
+    #     self._I45       = cp.asnumpy(I45_f.astype(self._I45.dtype))
+    #     self._I90       = cp.asnumpy(I90_f.astype(self._I90.dtype))
+    #     self._I135      = cp.asnumpy(I135_f.astype(self._I135.dtype))
+    #
+    #     self._S0        = cp.asnumpy(self._S0)
+    #     self._S1        = cp.asnumpy(self._S1)
+    #     self._S2        = cp.asnumpy(self._S2)
+    #     self._total_amp = cp.asnumpy(self._total_amp)
+    #     self._DoLP      = cp.asnumpy(self._DoLP)
+    #     self._AoP       = cp.asnumpy(self._AoP)
+    # -------------------------------------------------------------------'''
 
     def _calculate_polarization_cpu(self):
         """计算斯托克斯参数与偏振参数（含归一化和数据转换）CPU版本"""
