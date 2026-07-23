@@ -742,7 +742,7 @@ class Holo_Controller(QObject):
         self.gui.btn_all_in_one.clicked.connect(lambda: self.run_signal.emit("all_in_one"))
 
         self.gui.btn_save_config.clicked.connect(lambda: self.run_signal.emit("save_config"))
-        self.gui.btn_load_config.clicked.connect(lambda: self.run_signal.emit("load_config"))
+        self.gui.btn_load_config.clicked.connect(self.gui._menu_load_config)
         self.gui.btn_save_data.clicked.connect(lambda: self.run_signal.emit("save_data"))
         self.gui.btn_load_data.clicked.connect(lambda: self.run_signal.emit("load_data"))
 
@@ -1558,6 +1558,18 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(middle_panel, 5)
         main_layout.addWidget(right_panel, 1)
 
+    def _menu_load_config(self):
+        """File → Load Config: 弹出文件选择对话框"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Config",
+            self.config.save_and_load.get('config_load_path', ''),
+            "JSON (*.json);;All Files (*)")
+        if file_path:
+            file_path = os.path.normpath(file_path)
+            self.config.save_and_load['config_load_path'] = os.path.dirname(file_path)
+            self.config.save_and_load['config_load_name'] = os.path.basename(file_path)
+            self.run_signal.emit("load_config")
+
     def _menu_open_image(self):
         """File → Open Image: 弹出文件选择对话框"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1589,7 +1601,7 @@ class MainWindow(QMainWindow):
         act_save_data = file_menu.addAction("Save Data")
         act_save_data.triggered.connect(lambda: self.run_signal.emit("save_data"))
         act_load = file_menu.addAction("Load Config")
-        act_load.triggered.connect(lambda: self.run_signal.emit("load_config"))
+        act_load.triggered.connect(self._menu_load_config)
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
 
@@ -3722,8 +3734,7 @@ class MainWindow(QMainWindow):
                         value = value[key]
                     else:
                         value = getattr(value, key)
-            except (KeyError, TypeError):
-                print(f"[警告] 找不到配置项: {key_path}")
+            except (KeyError, TypeError, AttributeError):
                 continue
 
             # 设置控件值
@@ -3735,8 +3746,6 @@ class MainWindow(QMainWindow):
                 index = widget.findText(str(value))
                 if index != -1:
                     widget.setCurrentIndex(index)
-                else:
-                    print(f"[警告] QComboBox 中找不到对应项: {value}，key_path: {key_path}")
             else:
                 print(f"[警告] 不支持的控件类型: {type(widget)}，key_path: {key_path}")
 

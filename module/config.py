@@ -254,9 +254,9 @@ class HoloConfig:
     })
 
     save_and_load:          Dict[str, Any] = field(default_factory=lambda: {
-        'config_save_path'      : 'E:\Projects\HoloLabV1/results',
+        'config_save_path'      : r'E:\Projects\HoloLabV1\results',
         'config_save_name'      : 'config.json',
-        'config_load_path'      : 'E:\Projects\HoloLabV1/results',
+        'config_load_path'      : r'E:\Projects\HoloLabV1\results',
         'config_load_name'      : 'config_.json',
 
         'data_load_path'        : 'E:\Projects\HoloLabV1/results',
