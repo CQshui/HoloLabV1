@@ -60,6 +60,7 @@ import os
 import glob
 import time
 import numpy as np
+import torch
 from common.constants import unit_cm, unit_mm, unit_um, unit_nm
 from PIL import Image
 from typing import Union
@@ -131,6 +132,80 @@ class Holo_Processor(QObject):
             worker_polarization.run()
             self._show_polarization()
             self._show_hologram()
+
+        elif action_key == "yolo_sort":
+            self.image_ready.emit("Track", None, "YOLO+SORT Preview: Running detection & tracking...")
+            try:
+                from utils.yolo_sort_preview import run_yolo_sort_preview
+                from utils.utils_for_focusing.yoloV8.yolo import YOLO
+
+                # 获取重Build平面（转为 {float z: image} 格式）
+                if hasattr(self.hologram, 'reconstruction_z') and self.hologram.reconstruction_z:
+                    z_arr = self.hologram.reconstruction_z
+                    if self.hologram.reconstruction and isinstance(self.hologram.reconstruction, dict):
+                        # reconstruction dict keys are strings like "Z -0.600 mm"
+                        images = list(self.hologram.reconstruction.values())
+                        plane_images = {z_arr[i]: images[i] for i in range(min(len(z_arr), len(images)))}
+                    else:
+                        plane_images = {}
+                if not plane_images:
+                    # 用角谱快速重建一组平面
+                    tmp_recon = Reconstruction(hologram=self.hologram, config=self.config)
+                    tmp_recon.run()
+                    if not hasattr(self.hologram, 'reconstruction_z') or not self.hologram.reconstruction_z:
+                        self.image_ready.emit("Track", None, "YOLO+SORT Error: No reconstruction planes available")
+                        return
+                    z_arr = self.hologram.reconstruction_z
+                    plane_images = {z: img for z, img in zip(z_arr, tmp_recon.reconstruction_list)}
+                    if not plane_images:
+                        self.image_ready.emit("Track", None, "YOLO+SORT Error: No reconstruction planes available")
+                        return
+
+                # 加载 YOLO 模型（复用 Focusing 的类级缓存）
+                yolo_model = None
+                if hasattr(Focusing, '_yolo_model') and Focusing._yolo_model is not None:
+                    yolo_model = Focusing._yolo_model
+                else:
+                    yolo_path = self.config.focusing.get('yolo_model_path', '')
+                    if yolo_path and os.path.exists(yolo_path):
+                        device = torch.device(
+                            'cuda' if torch.cuda.is_available() and self.config.focusing.get('device', 'cpu') == 'cuda'
+                            else 'cpu')
+                        yolo_model = YOLO(
+                            input_shape=[640, 640], phi='s',
+                            model_path=yolo_path, cuda=(device.type == 'cuda'),
+                            letterbox_image=True, confidence=0.5, nms_iou=0.3, device=device
+                        )
+
+                if yolo_model is None:
+                    self.image_ready.emit("Track", None, "YOLO+SORT Error: YOLO model not loaded")
+                    return
+
+                # 运行预览
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                result = run_yolo_sort_preview(plane_images, yolo_model, device)
+
+                # 构建滑块可切换的每平面标注图字典（含轨迹汇总）
+                z_unit = unit_mm  # 默认 mm
+                if abs(result['z_list'][0]) < 1e-4:
+                    z_unit = unit_um
+                unit_str = 'mm' if z_unit == unit_mm else 'um'
+
+                detection_dict = {}
+                for z, annotated in result['per_plane']:
+                    key = f"Z {z / z_unit:.3f} {unit_str}"
+                    detection_dict[key] = annotated
+                # 轨迹汇总图放最后
+                if result.get('trajectory_image') is not None:
+                    detection_dict["Trajectories"] = result['trajectory_image']
+
+                self.image_ready.emit("Track", detection_dict,
+                    f"YOLO+SORT Done. {result['total_particles']} particles, {len(result['z_list'])} planes")
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.image_ready.emit("Track", None, f"YOLO+SORT Error: {e}")
 
         elif action_key == "spectrum":
             self.image_ready.emit("Spectrum", None, f"Spectrum method: {self.config.spectrum['method']}")
@@ -605,6 +680,7 @@ class Holo_Controller(QObject):
         self.gui.btn_phase.clicked.connect(lambda: self.run_signal.emit("phase"))
         self.gui.btn_data_summary.clicked.connect(lambda: self.run_signal.emit("data_summary"))
         self.gui.btn_polarization.clicked.connect(lambda: self.run_signal.emit("polarization"))
+        self.gui.btn_yolo_sort.clicked.connect(lambda: self.run_signal.emit("yolo_sort"))
         self.gui.btn_all_in_one.clicked.connect(lambda: self.run_signal.emit("all_in_one"))
 
         self.gui.btn_save_config.clicked.connect(lambda: self.run_signal.emit("save_config"))
@@ -941,10 +1017,17 @@ class Image_Viewer(QWidget):
             img = self._raw_image
             if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
                 value = img[y, x]  # 注意 y 是行，x 是列
-                if isinstance(value, np.generic):
+                if isinstance(value, np.ndarray):
+                    # 彩色图多通道：显示各通道值或平均值
+                    if value.size <= 4:
+                        text = f"({x}, {y}) | ({', '.join(f'{v:.0f}' for v in value.flat)})"
+                    else:
+                        text = f"({x}, {y}) | mean={value.mean():.0f}"
+                elif isinstance(value, np.generic):
                     value = value.item()  # 转成 Python 原生类型
-
-                text = f"({x}, {y}) | {value:.4f}"
+                    text = f"({x}, {y}) | {value:.4f}"
+                else:
+                    text = f"({x}, {y}) | {value:.4f}"
                 self.pixel_label.setText(text)
 
                 if not self.pixel_label.isVisible():
@@ -1097,10 +1180,18 @@ class Image_Viewer(QWidget):
             else:
                 norm_img = img
 
-            h, w = norm_img.shape
-
-            # 这里假设输入是单通道灰度图 numpy.ndarray，格式如原来
-            qimage = QImage(norm_img.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+            if norm_img.ndim >= 3:
+                h, w = norm_img.shape[:2]
+                c = norm_img.shape[2] if norm_img.ndim == 3 else 1
+                if c == 3:
+                    # BGR → RGB for QImage (need contiguous data)
+                    rgb = np.ascontiguousarray(norm_img[..., ::-1])
+                    qimage = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
+                else:
+                    qimage = QImage(norm_img.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+            else:
+                h, w = norm_img.shape
+                qimage = QImage(norm_img.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
             # qimage = QImage(norm_img.data, w, h, w, QImage.Format.Format_Grayscale8)
             self.image = qimage
             pixmap = QPixmap.fromImage(qimage)
@@ -1543,7 +1634,8 @@ class MainWindow(QMainWindow):
 
         # 图像内容
         tab_image_names = [
-            "Origin", "PreProcessing", "Spectrum", "Reconstruction", "Focusing",
+            "Origin", "PreProcessing", "Spectrum", "Reconstruction", "Track",
+            "Focusing",
             "Segmentation", "Identification", "Phase", "Polarization"]
         for name in tab_image_names:
             viewer = Image_Viewer()
@@ -1635,6 +1727,7 @@ class MainWindow(QMainWindow):
         self.btn_identification = QPushButton("Identification")
         self.btn_phase          = QPushButton("Phase Analysis")
         self.btn_polarization   = QPushButton("Polarization")
+        self.btn_yolo_sort      = QPushButton("YOLO+SORT Preview")
         self.btn_data_summary   = QPushButton("Data Summary")
         self.btn_all_in_one     = QPushButton("All in One")
 
@@ -1647,7 +1740,7 @@ class MainWindow(QMainWindow):
         '''分组_____________________________________'''
         operation_buttons   = [self.btn_open_image, self.btn_preprocessing, self.btn_spectrum, self.btn_reconstruction,
                                self.btn_focusing, self.btn_segmentation, self.btn_identification, self.btn_phase,
-                               self.btn_polarization, self.btn_data_summary, self.btn_all_in_one]
+                               self.btn_polarization, self.btn_yolo_sort, self.btn_data_summary, self.btn_all_in_one]
         for btn in operation_buttons:
             btn.clicked.connect(lambda _, b=btn: self.log_on_button_clicked(b.text()))
             btn.setMinimumHeight(32)    # 32
@@ -1891,6 +1984,7 @@ class MainWindow(QMainWindow):
         self.btn_identification = QPushButton("Identification")
         self.btn_phase          = QPushButton("Phase Analysis")
         self.btn_polarization   = QPushButton("Polarization")
+        self.btn_yolo_sort      = QPushButton("YOLO+SORT Preview")
         self.btn_data_summary   = QPushButton("Data Summary")
         self.btn_all_in_one     = QPushButton("All in One")
 
@@ -1898,7 +1992,7 @@ class MainWindow(QMainWindow):
         operation_buttons = [self.btn_open_image, self.btn_preprocessing, self.btn_spectrum,
                              self.btn_reconstruction, self.btn_focusing, self.btn_pchip,
                              self.btn_segmentation, self.btn_identification, self.btn_phase,
-                             self.btn_polarization, self.btn_data_summary, self.btn_all_in_one]
+                             self.btn_polarization, self.btn_yolo_sort, self.btn_data_summary, self.btn_all_in_one]
         for btn in operation_buttons:
             btn.clicked.connect(lambda _, b=btn: self.log_on_button_clicked(b.text()))
             btn.setMinimumHeight(30)
@@ -3491,6 +3585,7 @@ class MainWindow(QMainWindow):
         self.btn_identification.setEnabled(False)
         self.btn_phase.setEnabled(False)
         self.btn_polarization.setEnabled(False)
+        self.btn_yolo_sort.setEnabled(False)
         self.btn_data_summary.setEnabled(False)
         self.btn_all_in_one.setEnabled(False)
         self.btn_multi_images_start.setEnabled(False)
@@ -3505,6 +3600,7 @@ class MainWindow(QMainWindow):
         self.btn_identification.setEnabled(True)
         self.btn_phase.setEnabled(True)
         self.btn_polarization.setEnabled(True)
+        self.btn_yolo_sort.setEnabled(True)
         self.btn_data_summary.setEnabled(True)
         self.btn_all_in_one.setEnabled(True)
         self.btn_multi_images_start.setEnabled(True)
