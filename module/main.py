@@ -1,3 +1,8 @@
+# ── 必须在所有 torch/cuda import 之前设置，避免 PyTorch 多设备初始化 ──
+import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # 由 config.focusing['gpu_id'] 运行时覆盖
+
 from config import HoloConfig
 from hologram import Hologram
 from utils.open_image import OpenImage
@@ -58,9 +63,13 @@ import json
 import sys
 import os
 import glob
+import warnings
 import time
 import numpy as np
 import torch
+
+# 屏蔽 PyTorch .grad 访问非叶节点的警告（RCF 模型触发）
+warnings.filterwarnings('ignore', message='.*grad attribute.*')
 from common.constants import unit_cm, unit_mm, unit_um, unit_nm
 from PIL import Image
 from typing import Union
@@ -75,16 +84,58 @@ class Holo_Processor(QObject):
         self.config     = config
         self.hologram   = Hologram(self.config)
         self.images     = {}
+        self._completed_steps = set()  # 追踪已成功完成的步骤
+
+        # 统一设置 CUDA 可见设备，避免各模块重复设 os.environ 导致多设备初始化
+        gpu_id = config.focusing.get('gpu_id', 0)
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
         self._abort_requested = False   # 中途停止
 
+    # 前置步骤：每个 action 依赖的已完成步骤（任一满足即可）与提示名称
+    _PREREQ = {
+        'preprocessing':  ({'open_image'},             'Open Image'),
+        'spectrum':       ({'open_image', 'preprocessing'}, 'Open Image or PreProcessing'),
+        'reconstruction': ({'spectrum'},               'Spectrum'),
+        'focusing':       ({'reconstruction'},         'Reconstruction'),
+        'pchip':          ({'spectrum'},               'Spectrum'),
+        'yolo_sort':      ({'spectrum'},               'Spectrum'),
+        'polarization':   ({'focusing'},               'Focusing'),
+        'segmentation':   ({'focusing'},               'Focusing'),
+        'identification': ({'focusing'},               'Focusing'),
+        'phase':          ({'spectrum'},               'Spectrum'),
+        'data_summary':   ({'reconstruction'},         'Reconstruction'),
+    }
+
+    def _check_prerequisite(self, action_key: str) -> str:
+        """检查前置步骤是否已完成。返回缺失提示字符串，正常返回''。"""
+        if action_key not in self._PREREQ:
+            return ''
+        required, name = self._PREREQ[action_key]
+        if not any(r in self._completed_steps for r in required):
+            return f"Missing prerequisite: please run [ {name} ] first."
+        return ''
+
     @pyqtSlot(str)
     def run(self, action_key: str):
+        # 前置步骤检查（open_image / refresh_image / save/load 无需检查）
+        if action_key not in ('open_image', 'refresh_image',
+                              'save_config', 'load_config', 'save_data', 'load_data',
+                              'multi_images', 'all_in_one'):
+            missing = self._check_prerequisite(action_key)
+            if missing:
+                tab = 'Focusing' if action_key == 'pchip' else \
+                      'Track' if action_key == 'yolo_sort' else \
+                      action_key.capitalize().replace('_', ' ')
+                self.image_ready.emit(tab, None, missing)
+                return
 
         if   action_key == "open_image":
             work_open_image = OpenImage(hologram=self.hologram, config=self.config, mode = 'Single Image')
             work_open_image.run()
             self._show_hologram()
+            self._completed_steps.add('open_image')
 
             # work_open_image = OpenImage(hologram=self.hologram ,config=self.config)
             # hologram_raw, hologram, _image_loaded, image_height, image_width, holo_type, status_msg = work_open_image.run()
@@ -123,7 +174,7 @@ class Holo_Processor(QObject):
             img_dict = {img_key: img}
 
             self.images[img_key] = img_dict
-            print('预处理结束')
+            self._completed_steps.add('preprocessing')
             self.image_ready.emit(img_key, img_dict, f"{img_key} Finished. {status_msg}")
 
         elif action_key == "polarization":
@@ -132,9 +183,10 @@ class Holo_Processor(QObject):
             worker_polarization.run()
             self._show_polarization()
             self._show_hologram()
+            self._completed_steps.add('polarization')
 
         elif action_key == "yolo_sort":
-            self.image_ready.emit("Track", None, "YOLO+SORT Preview: Running detection & tracking...")
+            self.image_ready.emit("Track", {}, "YOLO+SORT Preview: Running detection & tracking...")
             try:
                 from utils.yolo_sort_preview import run_yolo_sort_preview
                 from utils.utils_for_focusing.yoloV8.yolo import YOLO
@@ -199,6 +251,7 @@ class Holo_Processor(QObject):
                 if result.get('trajectory_image') is not None:
                     detection_dict["Trajectories"] = result['trajectory_image']
 
+                self._completed_steps.update(['spectrum', 'reconstruction', 'yolo_sort'])
                 self.image_ready.emit("Track", detection_dict,
                     f"YOLO+SORT Done. {result['total_particles']} particles, {len(result['z_list'])} planes")
 
@@ -213,7 +266,7 @@ class Holo_Processor(QObject):
             worker_spectrum = Spectrum(hologram=self.hologram, config=self.config)
             worker_spectrum.run()
             self._show_spectrum()
-            print('频谱结束')
+            self._completed_steps.add('spectrum')
 
         elif action_key == "reconstruction":
             self.image_ready.emit("Reconstruction", {}, f"Reconstruction method: {self.config.reconstruction['method']}, On Going, Please wait ... ...")
@@ -221,7 +274,7 @@ class Holo_Processor(QObject):
             worker_reconstruction = Reconstruction(hologram=self.hologram ,config=self.config)
             worker_reconstruction.run()
             self._show_reconstruction()
-            print('重建结束')
+            self._completed_steps.update(['spectrum', 'reconstruction'])
 
         elif action_key == "focusing":
             self.image_ready.emit("Focusing", {}, f"Focusing method: {self.config.focusing['method']}, On Going, Please wait ... ...")
@@ -230,7 +283,7 @@ class Holo_Processor(QObject):
             worker_focusing = Focusing(hologram=self.hologram ,config=self.config)
             worker_focusing.run()
             self._show_focusing()
-            print('自聚焦结束')
+            self._completed_steps.add('focusing')
 
         elif action_key == "pchip":
             # PCHIP 快速自聚焦（独立于普通聚焦，不修改 focusing.method）
@@ -239,7 +292,7 @@ class Holo_Processor(QObject):
             worker_focusing = Focusing(hologram=self.hologram, config=self.config, method=_pchip_method)
             worker_focusing.run()
             self._show_focusing()
-            print('PCHIP 快速自聚焦结束')
+            self._completed_steps.add('pchip')
 
         elif action_key == "segmentation":
             self.image_ready.emit("Segmentation", {}, f"Segmentation method: {self.config.segmentation['method']}, On Going, Please wait ... ...")
@@ -247,6 +300,7 @@ class Holo_Processor(QObject):
             worker_segmentation = Segmentation(hologram=self.hologram ,config=self.config)
             worker_segmentation.run()
             self._show_segmentation()
+            self._completed_steps.add('segmentation')
 
         elif action_key == "identification":
             self.image_ready.emit("Identification", {}, f"Identification method: {self.config.identification['method']}, On Going, Please wait ... ...")
@@ -254,6 +308,7 @@ class Holo_Processor(QObject):
             worker_identification = Identification(hologram=self.hologram ,config=self.config)
             worker_identification.run()
             self._show_identification()
+            self._completed_steps.add('identification')
 
         elif action_key == "phase":
             self.image_ready.emit("Phase", {}, f"Phase analysis method: {self.config.phase['method']}, On Going, Please wait ... ...")
@@ -261,11 +316,13 @@ class Holo_Processor(QObject):
             worker_phase = Phase(hologram=self.hologram ,config=self.config)
             worker_phase.run()
             self._show_phase()
+            self._completed_steps.add('phase')
 
         elif action_key == "data_summary":
             worker_data_summary = DataSummary(hologram=self.hologram ,config=self.config)
             worker_data_summary.run()
             self._show_data_summary()
+            self._completed_steps.add('data_summary')
 
             '''频谱调试'''
             # fig = Figure(figsize=(6, 4))  # 可设置图像大小

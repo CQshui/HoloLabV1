@@ -129,7 +129,7 @@ class HoloConfig:
         'gpu_num'       : 1
     })
     focusing:               Dict[str, Any] = field(default_factory=lambda: {
-        'method'            : 'AI',
+        'method'            : 'AI_Gradient',
         'method_list'       : ['AI', 'Wavelet', 'Gradient', 'AI_Wavelet', 'AI_Gradient'],
         'yolo_model_path'   : r'E:\Projects\HoloLabV1\models/focusing/yolo_detection.pth',
         'rcf_model_path'    : r'E:\Projects\HoloLabV1\models/focusing/rcf_edge_detection.pth',
@@ -147,7 +147,7 @@ class HoloConfig:
         'method'                : 'PCHIP_GPU',
         'method_list'           : ['PCHIP', 'PCHIP_GPU'],
         'z_start'               : -1,       # PCHIP搜索范围下界（单位：mm）
-        'z_end'                 : -1,        # PCHIP搜索范围上界（单位：mm）
+        'z_end'                 : 1,        # PCHIP搜索范围上界（单位：mm）
         'metric'                : 'variance', # 聚焦评价指标：variance, gradient, laplacian, tenengrad, energy, brenner
         'metric_list'           : ['variance', 'gradient', 'laplacian', 'tenengrad', 'energy', 'brenner'],
         'max_evals'             : 100,         # 最大重建评估次数

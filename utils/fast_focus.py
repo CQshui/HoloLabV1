@@ -645,7 +645,6 @@ class FastFocusPCHIP:
             f"Time = {search_time:.2f}s"
         )
 
-        print('opt z', optimal_z)
         return self._optimal_image_full, optimal_z
 
     def modify_hologram_and_config(self):

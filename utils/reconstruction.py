@@ -521,13 +521,7 @@ class Reconstruction():
             self.reconstruction_list.append(image)
 
     def Reconstruction_Angular_Spectrum_CPU(self):
-        if self.type == 'Inline':
-            print('同轴处理')
-            self.current = ifft2(ifftshift(self.spectrum_cropped))
-
-        else:
-            print('离轴处理')
-            self.current = ifft2(ifftshift(self.spectrum_cropped))
+        self.current = ifft2(ifftshift(self.spectrum_cropped))
 
         # 图像尺寸（小尺寸）
         width, height = self.current.shape[1], self.current.shape[0]
@@ -557,11 +551,6 @@ class Reconstruction():
     def Reconstruction_Angular_Spectrum_GPU(self):
         """GPU 加速的多截面重建（PyTorch 向量化版本）"""
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        if self.type == 'Inline':
-            print('同轴处理')
-        else:
-            print('离轴处理')
 
         spectrum_t = torch.tensor(self.spectrum_cropped, device=device, dtype=torch.complex64)
         self.current = torch.fft.ifft2(torch.fft.ifftshift(spectrum_t))

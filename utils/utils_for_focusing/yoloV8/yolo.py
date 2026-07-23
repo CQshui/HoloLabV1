@@ -380,7 +380,7 @@ class YOLO(object):
                             color, 1, cv2.LINE_AA)
         ed = time.time()
         delta_time = ed - st
-        print('delta_time', delta_time)
+        # print('delta_time', delta_time)
         return image_np, (boxes_xywh, scores, labels), delta_time
 
     def get_FPS(self, image, test_interval):

@@ -143,7 +143,6 @@ class Focusing:
         self.focusing_xy     = []   # 每个颗粒的位置框坐标，嵌套列表[[x1,y1,x2,y2],
         self.focusing_each   = {}
 
-        print('1')
         _reconstruction      = hologram.reconstruction
         _reconstruction_list = [_reconstruction[i] for i in _reconstruction.keys()]
         # 缩放加速：每张图缩小到 1/rcf_scale 后再拼 stack
@@ -156,7 +155,6 @@ class Focusing:
                 for img in _reconstruction_list
             ]
         self.stack           = np.stack(_reconstruction_list, axis=2).astype(np.float64) * 255  #(height, width, num)或 axis=-1
-        print('2')
 
         self.method         = kwargs.get('method', config.focusing['method'])
         self.device         = torch.device(config.focusing['device'])
@@ -256,7 +254,6 @@ class Focusing:
 
         else:
             print('No such choice!')
-
         self.modify_hologram_and_config()
         self.save_to_file()
 
@@ -300,7 +297,6 @@ class Focusing:
     # 只加载 RCF 模型（用于 PCHIP 方法），不加载 YOLO
     def load_rcf_model(self):
         """加载 RCF 边缘检测模型（用于 PCHIP 快速自聚焦的聚焦分数计算）"""
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
         from utils.utils_for_focusing.rcf.models.RCF import RCF
         self.rcfModel = RCF(self.device)
         self.rcfModel.to(self.device)
@@ -313,9 +309,6 @@ class Focusing:
         if self.get_model:
             pass
         else:
-            # 指定使用的GPU
-            os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
-            # print(f"Using device: {self.device} (GPU {self.gpu_id})")
             CUDA_Available = (self.device.type == 'cuda')
             # print(CUDA_Available)
 
@@ -658,8 +651,6 @@ class Focusing:
         # resize 回全尺寸
         fused_cpu = cv2.resize(fused_cpu, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
         self.focusing = fused_cpu.astype(np.uint8)
-        tm1 = time.time()
-        print('gradient', tm1 - tm)
         return self.focusing
 
     def AutoFocusing_Gradient_Variance_AI_CPU(self):
@@ -687,7 +678,6 @@ class Focusing:
         particles, positions = self.AutoFocusing_AI_GPU(        # todo
             get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
         b = time.time()
-        print('ai', b - a)
 
         for i in range(len(particles)):
             # 提取位置信息
@@ -833,7 +823,6 @@ class Focusing:
         else:
             stacks, stacks_ori, names = tracker.get_stacks()
         d = time.time()
-        print('track', d - c)
 
         e = time.time()
         for i, stack in enumerate(stacks):
@@ -854,7 +843,6 @@ class Focusing:
             # 保存显示
             # cv2.imwrite(os.path.join(r'F:\dongjiayao\Data\HoloLab_testData\autofocus\ai_output', "{}.jpg".format(i)), img_tmp)
         f = time.time()
-        print('predict all', f - e)
         if get_position:
             return focused_particles, positions
         else:

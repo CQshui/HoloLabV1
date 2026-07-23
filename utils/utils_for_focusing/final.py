@@ -185,7 +185,6 @@ def rcf_predict_V1(model, predict_loader, save_dir='', device='cuda'):
             results = model(images)
 
         ed = time.time()
-        print("predict time:", ed - st)
         # g = torch.cuda.CUDAGraph()
         # with torch.cuda.graph(g):
         #     results = model(images)
@@ -215,7 +214,6 @@ def rcf_predict_V1(model, predict_loader, save_dir='', device='cuda'):
                 best_index = i
 
         ed = time.time()
-        print("predict time1:", ed - st)
 
     return best_focus_image, best_index
 

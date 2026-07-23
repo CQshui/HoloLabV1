@@ -82,7 +82,6 @@ class Polarization_():
 
     def run(self):
         """根据指定模式拆分偏振图像，计算偏振参数，并回传结果"""
-        print("开始偏振处理...")
         if   self.split_mode == 'quadrant':
             self._split_quadrant()  # 四象限模式
         elif self.split_mode == 'super_pixel':
@@ -125,7 +124,6 @@ class Polarization_():
         self._I45 = self.composite_image[0:h_half, w_half:w_half * 2].copy()  # w_half*2 确保取到末尾
         self._I90 = self.composite_image[h_half:h_half * 2, w_half:w_half * 2].copy()
         self._I135 = self.composite_image[h_half:h_half * 2, 0:w_half].copy()
-        print(f"四象限拆分完成。子图尺寸: {self._I0.shape}")
 
     def _split_superpixel(self):
         """超像素拆分：2×2 超像素块映射为四个偏振方向"""
@@ -143,7 +141,6 @@ class Polarization_():
                     self._I45[i // 2, j // 2] = block[0, 1]    # 右上
                     self._I90[i // 2, j // 2] = block[1, 1]    # 右下
                     self._I135[i // 2, j // 2] = block[1, 0]   # 左下
-        print(f"超像素拆分完成。子图尺寸: {self._I0.shape}")
 
     def _calculate_polarization(self):
         """计算斯托克斯参数与偏振参数（含归一化和数据转换）"""
@@ -201,7 +198,6 @@ class Polarization_():
         self._total_amp = self._total_amp.cpu().numpy()
         self._DoLP = self._DoLP.cpu().numpy()
         self._AoP = self._AoP.cpu().numpy()
-        print("偏振参数计算完成。")
 
     # '''---------------- CuPy 备份版本（保留以备需要时切换）----------------
     # 注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。

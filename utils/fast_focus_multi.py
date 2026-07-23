@@ -190,8 +190,6 @@ class MultiFocusPCHIP:
 
     def _load_models(self):
         """加载 YOLO 和 RCF 模型"""
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
-
         # YOLO
         yolo_path = self._config.focusing.get('yolo_model_path', '')
         CUDA_Available = (self.device.type == 'cuda')
@@ -424,9 +422,6 @@ class MultiFocusPCHIP:
 
         # ======================
         # 阶段 1：初始全局平面重建 + YOLO+SORT 建立轨迹
-        # ======================
-        print(f"[MultiFocusPCHIP] Stage 1: Initial reconstruction on {self.initial_global_planes} global planes")
-
         # 均匀选取初始平面
         if self.initial_global_planes >= self.z_num:
             init_z = self.z_array
@@ -445,7 +440,6 @@ class MultiFocusPCHIP:
         # YOLO+SORT 建立轨迹
         particles, init_z_list = self._run_yolo_sort_on_planes(init_images)
         print(f"  Detected {len(particles)} particles")
-
         if len(particles) == 0:
             print("[MultiFocusPCHIP] No particles detected, aborting.")
             h, w = self._hologram.hologram.shape[:2]
@@ -455,11 +449,7 @@ class MultiFocusPCHIP:
             self.focusing_each = {}
             return self.focusing, self.focusing_z, self.focusing_xy
 
-        # ======================
         # 阶段 2：为每个颗粒建立 PCHIP 代理模型
-        # ======================
-        print(f"[MultiFocusPCHIP] Stage 2: PCHIP surrogate modeling")
-
         particle_finders = {}
         for pid, pdata in particles.items():
             finder = ParticlePeakFinder(
@@ -475,7 +465,6 @@ class MultiFocusPCHIP:
         particle_kalman_states = {}  # 简化：直接用最近位置作为预测
 
         # 对初始平面：从重建图像中裁剪颗粒子图 → RCF 评分
-        print("[Init] Evaluating particles on initial planes...")
         for z in init_z_list:
             full_img = init_score_images[z]
             for pid, pdata in particles.items():
@@ -484,15 +473,9 @@ class MultiFocusPCHIP:
                 score = self._rcf_score_on_crop(crop)
                 particle_finders[pid].add_evaluation(z, score)
 
-                # ---- 打印初始评估 ----
-                finder = particle_finders[pid]
-                print(f"[Init] {pid}: z={z:.6f}, score={score:.4f} | "
-                      f"best z={finder.best_z:.6f}, best score={finder.best_score:.4f}")
-
         # ======================
         # 阶段 3：迭代 PCHIP 搜索
         # ======================
-        print(f"[MultiFocusPCHIP] Stage 3: Iterative PCHIP search")
 
         for round_idx in range(self.max_pchip_rounds):
             # 收集所有颗粒建议的新 z
@@ -512,10 +495,7 @@ class MultiFocusPCHIP:
                 particle_request_map.setdefault(next_z_rounded, []).append(pid)
 
             if not requested_z:
-                print(f"  Round {round_idx + 1}: All particles converged.")
                 break
-
-            print(f"  Round {round_idx + 1}: {len(requested_z)} unique z-planes requested")
 
             # 批量重建请求的 z 平面（打分用图：amplitude 或 sobolev_h1）
             new_images = self._batch_reconstruct_for_score(list(requested_z))
@@ -534,38 +514,10 @@ class MultiFocusPCHIP:
                     crop = self._crop_particle(full_img, predicted_pos, margin=self.crop_margin)
                     score = self._rcf_score_on_crop(crop)
 
-                    old_best_z = particle_finders[pid].best_z
-                    old_best_score = particle_finders[pid].best_score
                     particle_finders[pid].add_evaluation(z, score)
 
-                    # ---- 打印本次迭代评估 ----
-                    finder = particle_finders[pid]
-                    best_changed = (old_best_z != finder.best_z)
-                    change_str = " -> best updated!" if best_changed else ""
-                    print(f"  [Round {round_idx+1}] {pid}: z={z:.6f}, score={score:.4f} | "
-                          f"best z={finder.best_z:.6f}, best score={finder.best_score:.4f}{change_str}")
-
         # ======================
-        # 阶段 4：输出最终结果（解决 rcf_scale 缩放不一致问题）
-        # ======================
-        print(f"[MultiFocusPCHIP] Stage 4: Final output")
-
-        # ---- 打印每个颗粒的完整评估历史 ----
-        print("\n=== Particle Score History ===")
-        for pid, finder in particle_finders.items():
-            z_hist = np.array(finder.z_history)
-            s_hist = np.array(finder.score_history)
-            # 按 z 排序显示
-            idx = np.argsort(z_hist)
-            sorted_z = z_hist[idx]
-            sorted_s = s_hist[idx]
-            print(f"{pid}: best z={finder.best_z:.6f}, best score={finder.best_score:.4f}")
-            print(f"  evaluations: z={sorted_z.tolist()}, scores={[f'{s:.4f}' for s in sorted_s]}")
-            if finder.converged:
-                print(f"  status: converged")
-            else:
-                print(f"  status: max evals reached" if finder.eval_count >= finder.max_evals else "  status: stopped")
-        print("============================\n")
+        # 阶段 4：输出最终结果
 
         # 注意：_batch_reconstruct 返回的图像是经过频谱裁剪后的缩放尺寸（1/rcf_scale），
         # YOLO+SORT 检测到的位置 coordinates 也对应这个缩放尺寸（因为 YOLO 运行在缩放图上）。
