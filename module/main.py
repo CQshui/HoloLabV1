@@ -722,6 +722,7 @@ class Holo_Controller(QObject):
         ''''''
         '''参数变化'''
         self.gui.param_changed.connect(self.update_config)
+        self.gui.run_signal.connect(self.run_signal.emit)
 
         '''按钮操作'''
         self.gui.btn_refresh_image.clicked.connect(lambda: self.run_signal.emit("refresh_image"))
@@ -1520,6 +1521,7 @@ class Data_Viewer(QWidget):
 
 class MainWindow(QMainWindow):
     param_changed = pyqtSignal(str, object)
+    run_signal = pyqtSignal(str)
 
     def __init__(self, config):
         super().__init__()
@@ -1560,8 +1562,16 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("File")
-        file_menu.addAction("Open")
-        file_menu.addAction("Save")
+        act_open = file_menu.addAction("Open Image")
+        act_open.triggered.connect(lambda: self.run_signal.emit("open_image"))
+        act_open.setShortcut("Ctrl+O")
+        act_save = file_menu.addAction("Save Config")
+        act_save.triggered.connect(lambda: self.run_signal.emit("save_config"))
+        act_save.setShortcut("Ctrl+S")
+        act_save_data = file_menu.addAction("Save Data")
+        act_save_data.triggered.connect(lambda: self.run_signal.emit("save_data"))
+        act_load = file_menu.addAction("Load Config")
+        act_load.triggered.connect(lambda: self.run_signal.emit("load_config"))
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.close)
 
