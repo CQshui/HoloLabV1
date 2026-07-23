@@ -2,6 +2,14 @@ import os
 import glob
 import cv2
 import numpy as np
+
+
+def _imread(path, flags=cv2.IMREAD_GRAYSCALE):
+    """cv2.imread 替代，支持中文/Unicode 路径"""
+    try:
+        return cv2.imdecode(np.fromfile(path, dtype=np.uint8), flags)
+    except Exception:
+        return None
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -50,8 +58,8 @@ class OpenImage():
                 self.status_msg = f"Image not found: {self.image_url}"
                 return self.hologram_raw, self.hologram, self._image_loaded, self.status_msg
 
-            self.hologram_raw = cv2.imread(self.image_url, cv2.IMREAD_GRAYSCALE)
-            self.hologram     = cv2.imread(self.image_url, cv2.IMREAD_GRAYSCALE)
+            self.hologram_raw = _imread(self.image_url, cv2.IMREAD_GRAYSCALE)
+            self.hologram     = _imread(self.image_url, cv2.IMREAD_GRAYSCALE)
 
             '''若格式问题，判断图像是否正确加载'''
             if self.hologram_raw is None:

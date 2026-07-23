@@ -4,6 +4,14 @@ import numpy as np
 import pickle
 
 from common.constants import unit_cm, unit_mm, unit_um, unit_nm
+
+
+def _imread(path, flags=cv2.IMREAD_GRAYSCALE):
+    """cv2.imread 替代，支持中文/Unicode 路径"""
+    try:
+        return cv2.imdecode(np.fromfile(path, dtype=np.uint8), flags)
+    except Exception:
+        return None
 from module.config import HoloConfig
 
 '''不要了 接受 key_config 字典'''
@@ -41,7 +49,7 @@ class Hologram_using_Key_Config:
 
         '''全息图 : 读取的图像 hologram_raw、实际处理的变量 hologram'''
         if self.image_path is not None:
-            self.hologram_raw   = cv2.imread(os.path.join(self.image_path, self.image_name), cv2.IMREAD_GRAYSCALE)
+            self.hologram_raw   = _imread(os.path.join(self.image_path, self.image_name), cv2.IMREAD_GRAYSCALE)
             self.hologram       = self.hologram_raw.copy()
         else:
             self.hologram_raw   = np.zeros((10, 10), dtype="uint8")

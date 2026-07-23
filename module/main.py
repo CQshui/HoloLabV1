@@ -1558,12 +1558,30 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(middle_panel, 5)
         main_layout.addWidget(right_panel, 1)
 
+    def _menu_open_image(self):
+        """File → Open Image: 弹出文件选择对话框"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Hologram Image",
+            self.config.file_info.get('image_path', ''),
+            "Images (*.bmp *.jpg *.jpeg *.png *.tif *.tiff);;All Files (*)")
+        if file_path:
+            # 归一化路径分隔符（QFileDialog 可能返回混合 / 和 \\ 的路径）
+            file_path = os.path.normpath(file_path)
+            self.config.file_info['image_path'] = os.path.dirname(file_path)
+            self.config.file_info['image_name'] = os.path.basename(file_path)
+            # 更新 UI 上的路径显示
+            if 'file_info.image_path' in self.input_fields:
+                self.input_fields['file_info.image_path'].setText(self.config.file_info['image_path'])
+            if 'file_info.image_name' in self.input_fields:
+                self.input_fields['file_info.image_name'].setText(self.config.file_info['image_name'])
+            self.run_signal.emit("open_image")
+
     def _init_menu_bar(self):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("File")
         act_open = file_menu.addAction("Open Image")
-        act_open.triggered.connect(lambda: self.run_signal.emit("open_image"))
+        act_open.triggered.connect(self._menu_open_image)
         act_open.setShortcut("Ctrl+O")
         act_save = file_menu.addAction("Save Config")
         act_save.triggered.connect(lambda: self.run_signal.emit("save_config"))
