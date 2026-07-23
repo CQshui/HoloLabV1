@@ -147,11 +147,14 @@ class HoloConfig:
         'method'                : 'PCHIP_GPU',
         'method_list'           : ['PCHIP', 'PCHIP_GPU'],
         'z_start'               : -1,       # PCHIP搜索范围下界（单位：mm）
-        'z_end'                 : 0,        # PCHIP搜索范围上界（单位：mm）
+        'z_end'                 : -1,        # PCHIP搜索范围上界（单位：mm）
         'metric'                : 'variance', # 聚焦评价指标：variance, gradient, laplacian, tenengrad, energy, brenner
         'metric_list'           : ['variance', 'gradient', 'laplacian', 'tenengrad', 'energy', 'brenner'],
         'max_evals'             : 100,         # 最大重建评估次数
-        'initial_points_factor' : 1.0,        # 初始采样点数因子（越大初始采样越多）
+        'initial_points_factor' : 3.0,        # 初始采样点数因子（越大初始采样越多）
+        'focus_field'           : 'amplitude', # 重建场送入RCF的形式：amplitude(振幅|O|) 或 sobolev_h1(复振幅梯度√((1-γ)|O|²+γ|∇O|²))
+        'focus_field_list'      : ['amplitude', 'sobolev_h1'],
+        'gamma'                 : 1.0,        # Sobolev H¹ 参数：0→纯|O|，1→纯|∇O|（相位梯度主导），中间值按需调整
     })
     '''多颗粒 PCHIP 自聚焦参数_____________________________________'''
     fast_focus_multi:       Dict[str, Any] = field(default_factory=lambda: {
@@ -161,6 +164,9 @@ class HoloConfig:
         'max_pchip_rounds'          : 50,    # PCHIP 迭代轮数
         'max_evals_per_particle'    : 50,   # 每个颗粒最大评估次数
         'crop_margin'               : 20,   # 局部裁剪边距（像素）
+        'focus_field'               : 'amplitude', # 重建场送入RCF的形式：amplitude 或 sobolev_h1
+        'focus_field_list'          : ['amplitude', 'sobolev_h1'],
+        'gamma'                     : 0.99,        # Sobolev H¹ 参数：0→纯|O|，1→纯|∇O|
     })
 
 

@@ -395,6 +395,12 @@ class FastFocusPCHIP:
         self.initial_points_factor = config.fast_focus['initial_points_factor']
         self.k_size = k_size
 
+        # 重建场送入 RCF 的形式：'amplitude'(传统振幅|O|) 或 'sobolev_h1'(复振幅梯度)
+        # sobolev_h1: √((1-γ)|O|² + γ|∇O|²)，由 O=A·e^{iφ} ⇒ |∇O|²=(∇A)²+(A∇φ)²，
+        # 自动融合振幅梯度与相位梯度，聚焦面处相位变化剧烈 → 得分更高。
+        self.focus_field = config.fast_focus.get('focus_field', 'amplitude')
+        self.gamma = config.fast_focus.get('gamma', 0.99)
+
         # 设备：CPU 版全程 CPU，GPU 版强制 cuda，均不读 config.focusing['device']，
         # 避免为切 CPU 版而改 focusing.device 时把 GPU 版也拖到 CPU。
         if getattr(self, '_use_gpu', False):
@@ -460,9 +466,9 @@ class FastFocusPCHIP:
         self._M_full = M_full
         self._N_full = N_full
 
-    def _angular_spectrum_propagate(self, z: float) -> np.ndarray:
+    def _propagate_complex(self, z: float) -> np.ndarray:
         """
-        角谱法单截面重建（在缩放后的尺寸上进行）
+        角谱法单截面传播，返回复振幅场 U（numpy complex，缩小后的尺寸）。
 
         Parameters
         ----------
@@ -472,7 +478,7 @@ class FastFocusPCHIP:
         Returns
         -------
         np.ndarray
-            重建后的振幅图像（缩小后的尺寸）
+            复振幅场 U（complex）
         """
         # 传播函数（角谱传递函数）
         H = np.exp(1j * 2 * np.pi / self.wavelength * z) * \
@@ -481,8 +487,39 @@ class FastFocusPCHIP:
         # 频域传播（使用裁剪后的频谱）
         A = H * self.spectrum_cropped
         U = ifft2(ifftshift(A))
+        return U
 
-        # 返回振幅
+    def _angular_spectrum_propagate(self, z: float) -> np.ndarray:
+        """
+        最终展示用：振幅图 |U|（始终振幅，与 focus_field 无关）。
+
+        Returns
+        -------
+        np.ndarray
+            重建后的振幅图像（缩小后的尺寸）
+        """
+        return np.abs(self._propagate_complex(z))
+
+    def _propagate_for_score(self, z: float) -> np.ndarray:
+        """
+        打分用图像：按 focus_field 取 amplitude(|U|) 或 sobolev_h1(复振幅梯度)。
+        Sobolev 仅用于辅助自聚焦打分，不影响最终展示图。
+        """
+        return self._complex_to_focus_image(self._propagate_complex(z))
+
+    def _complex_to_focus_image(self, U: np.ndarray) -> np.ndarray:
+        """复振幅场 U → 打分用实数图像（numpy 版）。
+
+        - 'amplitude'  : |U|（传统振幅）
+        - 'sobolev_h1' : √((1-γ)|U|² + γ|∇U|²)，复振幅梯度模方融合振幅与相位梯度。
+          由 O=A·e^{iφ} ⇒ |∇O|²=(∇A)²+(A∇φ)²，无需显式分离相位。
+        """
+        if self.focus_field == 'sobolev_h1':
+            gamma = self.gamma
+            grad_x = U - np.roll(U, 1, axis=-1)   # 沿 x 方向差分
+            grad_y = U - np.roll(U, 1, axis=-2)   # 沿 y 方向差分
+            M = np.abs(grad_x) ** 2 + np.abs(grad_y) ** 2  # |∇U|²
+            return np.sqrt((1 - gamma) * np.abs(U) ** 2 + gamma * M)
         return np.abs(U)
 
     def _rcf_predict_single(self, amplitude: np.ndarray) -> float:
@@ -539,8 +576,8 @@ class FastFocusPCHIP:
         float
             负聚焦分数（PeakFinder 默认 target='min'，所以返回负值）
         """
-        # 1. 单截面重建
-        image = self._angular_spectrum_propagate(z)
+        # 1. 单截面重建（打分用图：amplitude 或 sobolev_h1，按 focus_field）
+        image = self._propagate_for_score(z)
 
         # 2. 归一化到 [0,1] 供 RCF 使用
         abs_v = np.abs(image)
@@ -662,8 +699,12 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
         self._M_full = M_full
         self._N_full = N_full
 
-    def _angular_spectrum_propagate(self, z: float) -> np.ndarray:
-        """GPU 加速的单截面重建（torch 版本）"""
+    def _propagate_complex(self, z: float) -> np.ndarray:
+        """GPU 角谱传播，返回复振幅场 U（torch 计算后转回 CPU numpy complex）。
+
+        振幅图(_angular_spectrum_propagate)与打分图(_propagate_for_score)均复用
+        基类 numpy 逻辑，分别取 |U| 与 Sobolev 变换；Sobolev 仅在打分时使用。
+        """
         wavelength = self.wavelength
         # 传播函数（角谱传递函数）：exp(1j*(2π/λ*z - π*λ*z*f²))
         H = torch.exp(1j * (2 * torch.pi / wavelength * z
@@ -672,7 +713,7 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
         A = H * self.spectrum_gpu
         U = torch.fft.ifft2(torch.fft.ifftshift(A))
 
-        return torch.abs(U).detach().cpu().numpy()
+        return U.detach().cpu().numpy()
 
     # '''---------------- CuPy 备份版本（保留以备需要时切换）----------------
     # 注意：cupy 与 torch 不可混用，会导致堆内存损坏 (0xC0000374)。

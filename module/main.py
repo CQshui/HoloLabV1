@@ -2407,6 +2407,17 @@ class MainWindow(QMainWindow):
                 "value": str(ff_conf.get("initial_points_factor", "1.0")),
                 "name": "Initial Points Factor"
             },
+            "fast_focus.focus_field": {
+                "type": "combo",
+                "value": ff_conf.get("focus_field", "amplitude"),
+                "options": ff_conf.get("focus_field_list", ["amplitude", "sobolev_h1"]),
+                "name": "Focus Field"
+            },
+            "fast_focus.gamma": {
+                "type": "input",
+                "value": str(ff_conf.get("gamma", "0.99")),
+                "name": "Gamma (Sobolev)"
+            },
 
             "line2": {"type": "line"},
 
@@ -2431,6 +2442,17 @@ class MainWindow(QMainWindow):
                 "type": "input",
                 "value": str(ffm_conf.get("crop_margin", "20")),
                 "name": "Crop Margin (px)"
+            },
+            "fast_focus_multi.focus_field": {
+                "type": "combo",
+                "value": ffm_conf.get("focus_field", "amplitude"),
+                "options": ffm_conf.get("focus_field_list", ["amplitude", "sobolev_h1"]),
+                "name": "Focus Field"
+            },
+            "fast_focus_multi.gamma": {
+                "type": "input",
+                "value": str(ffm_conf.get("gamma", "0.99")),
+                "name": "Gamma (Sobolev)"
             },
 
             "line3": {"type": "line"},

@@ -405,7 +405,10 @@ class Kalman_tracker:
                 # st1 = time.time()
             # YOLOv8检测
             # try:
+                res = self.yolo_model.detect_image_np(frame, crop=False, count=False, draw=False, device=self.device)
+                print(type(res), len(res), res)
                 result_img, results, inference_time = self.yolo_model.detect_image_np(frame, crop=False, count=False, draw=False, device=self.device)
+
                 # result_img_pil = Image.fromarray(frame, mode='L')
                 # imshow_np(frame, '检测结果')
             # except:

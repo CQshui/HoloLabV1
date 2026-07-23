@@ -334,7 +334,7 @@ class YOLO(object):
         # delta_time = ed - st
 
         if results[0] is None:  # todo, 当没有识别出物体时，会返回整张图，这不合理
-            return image_np, (np.zeros((0, 4)), np.zeros(0), np.zeros(0))
+            return image_np, (np.zeros((0, 4)), np.zeros(0), np.zeros(0)), 0
 
         det = results[0]
         xyxy = det[:, :4]  # 已经是原图坐标
@@ -380,6 +380,7 @@ class YOLO(object):
                             color, 1, cv2.LINE_AA)
         ed = time.time()
         delta_time = ed - st
+        print('delta_time', delta_time)
         return image_np, (boxes_xywh, scores, labels), delta_time
 
     def get_FPS(self, image, test_interval):

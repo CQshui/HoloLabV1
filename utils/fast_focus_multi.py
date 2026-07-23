@@ -183,6 +183,11 @@ class MultiFocusPCHIP:
         self.max_evals_per_particle = config.fast_focus_multi.get('max_evals_per_particle', 12)
         self.crop_margin = config.fast_focus_multi.get('crop_margin', 20)  # 局部裁剪边距
 
+        # 重建场送入 RCF 的形式：'amplitude'(振幅|O|) 或 'sobolev_h1'(复振幅梯度)
+        # sobolev_h1: √((1-γ)|O|² + γ|∇O|²)，|∇O|²=(∇A)²+(A∇φ)² 融合振幅与相位梯度。
+        self.focus_field = config.fast_focus_multi.get('focus_field', 'amplitude')
+        self.gamma = config.fast_focus_multi.get('gamma', 0.99)
+
     def _load_models(self):
         """加载 YOLO 和 RCF 模型"""
         os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
@@ -213,12 +218,11 @@ class MultiFocusPCHIP:
             self.rcfModel.to(self.device)
             self.rcfModel.eval()
 
-    def _batch_reconstruct(self, z_values: List[float]) -> Dict[float, np.ndarray]:
+    def _reconstruct_complex_batch(self, z_values: List[float]) -> Dict[float, np.ndarray]:
         """
-        对一组 z 值做批量角谱重建（numpy 实现）
-        返回 {z: 振幅图像(缩放尺寸, 1/rcf_scale)}
+        批量角谱重建（numpy 实现），返回 {z: 复振幅场 U(complex)}。
 
-        注意：必须与 MultiFocusPCHIP_GPU._batch_reconstruct 数学等价 ——
+        注意：必须与 MultiFocusPCHIP_GPU._reconstruct_complex_batch 数学等价 ——
         频率轴用 fftfreq 构建，传递函数用菲涅尔近似 exp(j*2π/λ*z)*exp(-j*π*λ*z*f²)。
         不能改用 Reconstruction_Angular_Spectrum_CPU，后者用 np.linspace 构建频率轴，
         步长 1/((N-1)d) 与 fftfreq 的 1/(Nd) 不一致，导致传递函数与频谱频率错位、
@@ -251,8 +255,36 @@ class MultiFocusPCHIP:
                 np.exp(-1j * np.pi * wavelength * z * fft_squa)
             A = H * spectrum_cropped
             U = np.fft.ifft2(np.fft.ifftshift(A))
-            result[z] = np.abs(U)
+            result[z] = U
         return result
+
+    def _batch_reconstruct(self, z_values: List[float]) -> Dict[float, np.ndarray]:
+        """{z: 振幅图 |U|}（用于 YOLO 检测与最终展示，始终振幅，与 focus_field 无关）。"""
+        return {z: np.abs(U) for z, U in self._reconstruct_complex_batch(z_values).items()}
+
+    def _batch_reconstruct_for_score(self, z_values: List[float]) -> Dict[float, np.ndarray]:
+        """{z: 打分用图}（amplitude 或 sobolev_h1，按 focus_field）。
+        Sobolev 仅辅助自聚焦打分，不影响最终展示图。
+        amplitude 模式等价于 _batch_reconstruct，避免重复 FFT。"""
+        if self.focus_field == 'amplitude':
+            return self._batch_reconstruct(z_values)
+        return {z: self._complex_to_focus_image(U)
+                for z, U in self._reconstruct_complex_batch(z_values).items()}
+
+    def _complex_to_focus_image(self, U: np.ndarray) -> np.ndarray:
+        """复振幅场 U → 打分用实数图像（numpy 版）。
+
+        - 'amplitude'  : |U|（传统振幅）
+        - 'sobolev_h1' : √((1-γ)|U|² + γ|∇U|²)，复振幅梯度模方融合振幅与相位梯度。
+          由 O=A·e^{iφ} ⇒ |∇O|²=(∇A)²+(A∇φ)²，无需显式分离相位。
+        """
+        if self.focus_field == 'sobolev_h1':
+            gamma = self.gamma
+            grad_x = U - np.roll(U, 1, axis=-1)   # 沿 x
+            grad_y = U - np.roll(U, 1, axis=-2)   # 沿 y
+            M = np.abs(grad_x) ** 2 + np.abs(grad_y) ** 2  # |∇U|²
+            return np.sqrt((1 - gamma) * np.abs(U) ** 2 + gamma * M)
+        return np.abs(U)
 
     def _crop_particle(self, image: np.ndarray, bbox: Tuple[int, int, int, int],
                        margin: int = 20) -> np.ndarray:
@@ -402,8 +434,13 @@ class MultiFocusPCHIP:
             indices = np.linspace(0, self.z_num - 1, self.initial_global_planes, dtype=int)
             init_z = self.z_array[indices]
 
-        # 批量重建初始平面
+        # 批量重建初始平面（振幅图，用于 YOLO 检测与最终展示）
         init_images = self._batch_reconstruct(init_z.tolist())
+        # 打分用图：sobolev_h1 模式额外重建复振幅梯度图；amplitude 模式直接复用振幅图
+        if self.focus_field == 'sobolev_h1':
+            init_score_images = self._batch_reconstruct_for_score(init_z.tolist())
+        else:
+            init_score_images = init_images
 
         # YOLO+SORT 建立轨迹
         particles, init_z_list = self._run_yolo_sort_on_planes(init_images)
@@ -440,7 +477,7 @@ class MultiFocusPCHIP:
         # 对初始平面：从重建图像中裁剪颗粒子图 → RCF 评分
         print("[Init] Evaluating particles on initial planes...")
         for z in init_z_list:
-            full_img = init_images[z]
+            full_img = init_score_images[z]
             for pid, pdata in particles.items():
                 pos = pdata['positions']
                 crop = self._crop_particle(full_img, pos, margin=self.crop_margin)
@@ -480,8 +517,8 @@ class MultiFocusPCHIP:
 
             print(f"  Round {round_idx + 1}: {len(requested_z)} unique z-planes requested")
 
-            # 批量重建请求的 z 平面
-            new_images = self._batch_reconstruct(list(requested_z))
+            # 批量重建请求的 z 平面（打分用图：amplitude 或 sobolev_h1）
+            new_images = self._batch_reconstruct_for_score(list(requested_z))
 
             # 对每个请求的平面：用卡尔曼预测位置 → 局部裁剪 → RCF 评分
             for z, full_img in new_images.items():
@@ -613,11 +650,11 @@ class MultiFocusPCHIP_GPU(MultiFocusPCHIP):
     """
     _use_gpu = True
 
-    def _batch_reconstruct(self, z_values: List[float]) -> Dict[float, np.ndarray]:
+    def _reconstruct_complex_batch(self, z_values: List[float]) -> Dict[float, np.ndarray]:
         """
-        PyTorch 实现的批量角谱重建。
-        输入：需要重建的 z 值列表
-        返回：{z: 振幅图像(缩放尺寸, numpy)}
+        PyTorch 批量角谱重建，返回 {z: 复振幅场 U(numpy complex)}。
+        批量 FFT 在 GPU 完成；振幅图(_batch_reconstruct)与打分图(_batch_reconstruct_for_score)
+        由基类 numpy 逻辑从 U 派生，Sobolev 仅在打分时使用。
         """
         # 频谱裁剪（与原始逻辑一致）
         scale = self.rcf_scale
@@ -639,7 +676,7 @@ class MultiFocusPCHIP_GPU(MultiFocusPCHIP):
 
         M, N = spectrum.shape
 
-        # 生成频率坐标（与 CuPy 版本一致）
+        # 生成频率坐标（与 CPU 版一致：fftshift(fftfreq)）
         fft_x = torch.fft.fftshift(torch.fft.fftfreq(N, d=pixel_size_scaled, device=self.device))
         fft_y = torch.fft.fftshift(torch.fft.fftfreq(M, d=pixel_size_scaled, device=self.device))
         fft_mesh_x, fft_mesh_y = torch.meshgrid(fft_x, fft_y, indexing='xy')
@@ -662,20 +699,14 @@ class MultiFocusPCHIP_GPU(MultiFocusPCHIP):
         A_shifted = torch.fft.ifftshift(A, dim=(-2, -1))          # 将零频移到中心
         U = torch.fft.ifft2(A_shifted, dim=(-2, -1))              # 复数场
 
-        # 取振幅并转回 numpy（同步 GPU 操作）
-        amplitude = torch.abs(U)
-
         # 确保所有计算完成后再取数据
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
+        U_cpu = U.detach().cpu().numpy()
 
-        result = {}
-        for i, z in enumerate(z_unique):
-            result[z] = amplitude[i].cpu().numpy()
-
-        # 清理显存（可选）
-        del spectrum, H, A, U, amplitude
+        # 清理显存
+        del spectrum, H, A, A_shifted, U
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
 
-        return result
+        return {z: U_cpu[i] for i, z in enumerate(z_unique)}
