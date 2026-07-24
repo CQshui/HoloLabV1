@@ -1,7 +1,28 @@
 from common.constants import unit_cm, unit_mm, unit_um, unit_nm
 from dataclasses import dataclass, field
 import json
+import numpy as np
 from typing import Dict, Any
+
+
+def _json_serializable(obj):
+    """将 numpy/torch 等非 JSON 原生类型转为可序列化值"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        v = float(obj)
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return v
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    try:
+        import torch
+        if isinstance(obj, torch.device):
+            return str(obj)
+    except ImportError:
+        pass
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 @dataclass
 class CameraConfig:
@@ -134,6 +155,7 @@ class HoloConfig:
         'yolo_model_path'   : r'E:\Projects\HoloLabV1\models/focusing/yolo_detection.pth',
         'rcf_model_path'    : r'E:\Projects\HoloLabV1\models/focusing/rcf_edge_detection.pth',
         'rcf_scale'         : 8,  # rcf所处理图像的缩放倍率，图像原尺寸要/scale
+        'min_particle_area' : 1600,  # AI+Wavelet/Gradient: bbox最小面积(px²)，小于此值的颗粒不贴入聚焦图
         'device'            : 'cuda',
         'device_list'       : ['cuda', 'cpu'],
         'cpu_num'           : 8,
@@ -325,14 +347,13 @@ class HoloConfig:
         """保存配置到JSON文件"""
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(self.__dict__, f, indent=4)
+                json.dump(self.__dict__, f, indent=4,
+                          default=_json_serializable, allow_nan=False)
 
             msg = f"Save Config to: {path}"
-            # print(f"配置文件已保存到：{path}")
 
         except Exception as e:
             msg = f"Failed to save Config: {e}"
-            # print(f"保存配置失败: {e}")
 
         return msg
 

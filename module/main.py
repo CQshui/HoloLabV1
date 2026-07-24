@@ -235,7 +235,10 @@ class Holo_Processor(QObject):
 
                 # 运行预览
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                result = run_yolo_sort_preview(plane_images, yolo_model, device)
+                result = run_yolo_sort_preview(
+                    plane_images, yolo_model, device,
+                    confidence=0.5,
+                    rcf_scale=self.config.focusing.get('rcf_scale', 8))
 
                 # 构建滑块可切换的每平面标注图字典（含轨迹汇总）
                 z_unit = unit_mm  # 默认 mm
@@ -2518,6 +2521,11 @@ class MainWindow(QMainWindow):
                 "type": "input",
                 "value": conf.get("yolo_model_path", ""),
                 "name": "Yolo Path"
+            },
+            "focusing.min_particle_area": {
+                "type": "input",
+                "value": str(conf.get("min_particle_area", "1600")),
+                "name": "Min Particle Area"
             },
 
             "line1": {"type": "line"},

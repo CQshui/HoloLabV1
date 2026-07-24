@@ -200,10 +200,38 @@ def associate_detections_to_tracks(detections, trackers, iou_threshold=0.3, dist
 
 
 class Sort(object):
+    """SORT (Simple Online and Realtime Tracking) 多目标追踪器。
+
+    使用卡尔曼滤波器 + 匈牙利算法，在帧间关联检测框以维持颗粒 ID。
+
+    Parameters
+    ----------
+    max_age : int
+        追踪器最大存活帧数（默认 1）。
+        若 tracker 连续 ``max_age`` 帧未被匹配，则认为颗粒消失并删除。
+        值越大对漏检越容忍（z 平面间移动快可调大）。
+    min_hits : int
+        最低命中次数（默认 3）。
+        新 tracker 必须连续命中 ``min_hits`` 帧才确认输出，避免噪声/误检。
+        例外：``frame_count <= min_hits`` 时（首几帧）直接输出。
+    iou_threshold : float
+        IoU 匹配阈值（默认 0.3）。
+        检测框与追踪框的交并比下限，低于此值不匹配。
+        值越大匹配越严格，值越小越容易跨平面关联。
+    distance_threshold : float
+        中心距离上限，单位像素（默认 30）。
+        检测框与追踪框中心欧氏距离超过该值时拒绝匹配，
+        防止远距离误关联（即使 IoU 高）。
+        颗粒在 z 平面间快速移动时应增大（如 50-100）。
+
+    Notes
+    -----
+    匹配策略：匈牙利算法优化复合得分 ``-(IoU + (1 - dist/dist_threshold))``，
+    同时满足 IoU > iou_threshold 且中心距 < distance_threshold 才算匹配成功。
+
+    ID 映射：内部 KalmanBoxTracker.id 可能跳变，对外输出时重定向为连续显示 ID。
+    """
     def __init__(self, max_age=1, min_hits=3, iou_threshold=0.3, distance_threshold=30):
-        """
-        Sets key parameters for SORT
-        """
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold

@@ -30,7 +30,8 @@ def run_yolo_sort_preview(
     plane_images: Dict[float, np.ndarray],
     yolo_model: YOLO,
     device,
-    confidence: float = 0.3,
+    confidence: float = 0.5,
+    rcf_scale: int = 8,
     max_planes_per_grid: int = 12,
 ) -> Dict:
     """
@@ -68,17 +69,26 @@ def run_yolo_sort_preview(
     yolo_model.confidence = confidence
 
     try:
-        # 1. 准备图像列表 (uint8 BGR)
+        # 1. 准备图像列表 (uint8 BGR)，按 rcf_scale 缩放以匹配 Focusing AI 行为
         image_stack_list = []
         for z in z_list:
             img_norm = _to_uint8(plane_images[z])
+            h_full, w_full = img_norm.shape[:2]
+            h_small, w_small = h_full // rcf_scale, w_full // rcf_scale
+            img_norm = cv2.resize(img_norm, (w_small, h_small), interpolation=cv2.INTER_LINEAR)
             if img_norm.ndim == 2:
                 img_norm = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
             image_stack_list.append(img_norm)
 
-        # 2. 逐平面运行 YOLO+SORT，收集各帧检测与轨迹历史
+        # 2. 按缩放后的图像构建 {z: image}，逐平面运行 YOLO+SORT
+        plane_images_scaled = {z: cv2.resize(
+            _to_uint8(plane_images[z]),
+            (_to_uint8(plane_images[z]).shape[1] // rcf_scale,
+             _to_uint8(plane_images[z]).shape[0] // rcf_scale),
+            interpolation=cv2.INTER_LINEAR
+        ) for z in z_list}
         per_plane_detections, track_id_to_bbox_history = _collect_per_plane_detections(
-            yolo_model, device, plane_images, z_list
+            yolo_model, device, plane_images_scaled, z_list
         )
 
         # 3. 生成网格图

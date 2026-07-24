@@ -164,6 +164,7 @@ class Focusing:
         self.yoloModel_path = config.focusing['yolo_model_path']
         self.rcfModel_path  = config.focusing['rcf_model_path']
         self.rcf_scale      = config.focusing['rcf_scale']      # 用于rcf图像缩放
+        self.min_particle_area = config.focusing.get('min_particle_area', 1600)  # AI+Wavelet/Gradient 颗粒最小面积
 
         self.get_model      = config.focusing['get_model']      # 如果为True，将直接给Focus类传入模型本身，而不是根据路径加载模型
 
@@ -498,38 +499,42 @@ class Focusing:
         self.focusing = np.clip(result, 0, 255).astype(np.uint8)
         return self.focusing
 
+    def _paste_particles_fullres(self, canvas, particles, positions):
+        """将颗粒贴到画布上。canvas 和 positions 同为 self.stack 尺度。"""
+        ch, cw = canvas.shape[:2]
+        for i in range(len(particles)):
+            left, top, right, bottom = positions[i]
+            area = (bottom - top) * (right - left)
+            print(f"[Paste] particle {i}: pos=({left},{top},{right},{bottom}) area={area} "
+                  f"canvas=({ch},{cw}) particle_shape={particles[i].shape}")
+            if area > self.min_particle_area:
+                particle = particles[i]
+                if particle.ndim == 3:
+                    particle = cv2.cvtColor(particle, cv2.COLOR_BGR2GRAY) if particle.shape[2] == 3 else particle[:,:,0]
+                particle = particle.astype(np.uint8)
+                l2, t2 = max(0, left), max(0, top)
+                r2, b2 = min(cw, right), min(ch, bottom)
+                tw, th = r2 - l2, b2 - t2
+                if th > 0 and tw > 0:
+                    particle_fit = cv2.resize(particle, (tw, th),
+                                              interpolation=cv2.INTER_LINEAR)
+                    canvas[t2:b2, l2:r2] = particle_fit
+                    print(f"  -> pasted ({tw}x{th})")
+                else:
+                    print(f"  -> SKIP: tw={tw} th={th}")
+            else:
+                print(f"  -> SKIP: area too small")
+
     def AutoFocusing_Wavelet_AI_CPU(self):
         wavelet_processed = self.AutoFocusing_WaveLet_CPU()
-        # wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
-        particles, positions = self.AutoFocusing_AI_CPU(
-            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
-
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
-
-                wavelet_processed[top:bottom, left:right] = particle
-
+        particles, positions = self.AutoFocusing_AI_CPU(get_position=True)
+        self._paste_particles_fullres(wavelet_processed, particles, positions)
         self.focusing = wavelet_processed
 
     def AutoFocusing_Wavelet_AI_GPU(self):
         wavelet_processed = self.AutoFocusing_WaveLet_GPU()
-        # wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
-        particles, positions = self.AutoFocusing_AI_GPU(
-            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
-
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
-
-                wavelet_processed[top:bottom, left:right] = particle
-
+        particles, positions = self.AutoFocusing_AI_GPU(get_position=True)
+        self._paste_particles_fullres(wavelet_processed, particles, positions)
         self.focusing = wavelet_processed
 
     def AutoFocusing_Gradient_Variance_CPU(self):
@@ -654,40 +659,15 @@ class Focusing:
         return self.focusing
 
     def AutoFocusing_Gradient_Variance_AI_CPU(self):
-        # wavelet_processed = self.AutoFocusing_WaveLet_GPU()
         wavelet_processed = self.AutoFocusing_Gradient_Variance_CPU()
-        particles, positions = self.AutoFocusing_AI_CPU(
-            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
-
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
-
-                wavelet_processed[top:bottom, left:right] = particle
-
+        particles, positions = self.AutoFocusing_AI_CPU(get_position=True)
+        self._paste_particles_fullres(wavelet_processed, particles, positions)
         self.focusing = wavelet_processed
 
     def AutoFocusing_Gradient_Variance_AI_GPU(self):
-        # wavelet_processed = self.AutoFocusing_WaveLet_GPU()
-        wavelet_processed    = self.AutoFocusing_Gradient_Variance_GPU()
-
-        a = time.time()
-        particles, positions = self.AutoFocusing_AI_GPU(        # todo
-            get_position=True)  # positions为列表，储存元组(left_ori, top_ori, right_ori, bottom_ori)
-        b = time.time()
-
-        for i in range(len(particles)):
-            # 提取位置信息
-            left, top, right, bottom = positions[i]
-            if (bottom - top) * (right - left) > 1600:
-                # 提取对应的颗粒图像
-                particle = particles[i].astype(np.uint8)
-
-                wavelet_processed[top:bottom, left:right] = particle
-
+        wavelet_processed = self.AutoFocusing_Gradient_Variance_GPU()
+        particles, positions = self.AutoFocusing_AI_GPU(get_position=True)
+        self._paste_particles_fullres(wavelet_processed, particles, positions)
         self.focusing = wavelet_processed
 
     def AutoFocusing_AI_CPU(self, get_position=False):
