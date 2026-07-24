@@ -69,24 +69,20 @@ def run_yolo_sort_preview(
     yolo_model.confidence = confidence
 
     try:
-        # 1. 准备图像列表 (uint8 BGR)，按 rcf_scale 缩放以匹配 Focusing AI 行为
-        image_stack_list = []
+        # 1. 一次性准备缩放图像：归一到 uint8 → 按 rcf_scale 缩小 → 灰度转 BGR
+        image_stack_list = []        # 用于可视化绘框
+        plane_images_scaled = {}     # 用于 YOLO 检测
         for z in z_list:
-            img_norm = _to_uint8(plane_images[z])
-            h_full, w_full = img_norm.shape[:2]
-            h_small, w_small = h_full // rcf_scale, w_full // rcf_scale
-            img_norm = cv2.resize(img_norm, (w_small, h_small), interpolation=cv2.INTER_LINEAR)
-            if img_norm.ndim == 2:
-                img_norm = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
-            image_stack_list.append(img_norm)
+            img = _to_uint8(plane_images[z])
+            h, w = img.shape[:2]
+            img_small = cv2.resize(img, (w // rcf_scale, h // rcf_scale),
+                                   interpolation=cv2.INTER_LINEAR)
+            plane_images_scaled[z] = img_small
+            if img_small.ndim == 2:
+                img_small = cv2.cvtColor(img_small, cv2.COLOR_GRAY2BGR)
+            image_stack_list.append(img_small)
 
-        # 2. 按缩放后的图像构建 {z: image}，逐平面运行 YOLO+SORT
-        plane_images_scaled = {z: cv2.resize(
-            _to_uint8(plane_images[z]),
-            (_to_uint8(plane_images[z]).shape[1] // rcf_scale,
-             _to_uint8(plane_images[z]).shape[0] // rcf_scale),
-            interpolation=cv2.INTER_LINEAR
-        ) for z in z_list}
+        # 2. 逐平面运行 YOLO+SORT
         per_plane_detections, track_id_to_bbox_history = _collect_per_plane_detections(
             yolo_model, device, plane_images_scaled, z_list
         )
@@ -122,7 +118,7 @@ def run_yolo_sort_preview(
 def _to_uint8(img: np.ndarray) -> np.ndarray:
     """将任意图像归一化到 uint8 [0,255]"""
     if img.dtype == np.uint8:
-        return img.copy()
+        return img  # 已为 uint8，直接引用避免拷贝
     abs_v = np.abs(img)
     if abs_v.max() > abs_v.min():
         norm = (abs_v - abs_v.min()) / (abs_v.max() - abs_v.min())
