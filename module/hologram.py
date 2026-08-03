@@ -299,6 +299,9 @@ class Hologram:
 
         '''聚焦图、子图、深度图_______________________________________'''
         self.focusing               = self._make_empty_image()
+        self.focusing_sobolev       = None   # Sobolev H¹ 特征图（PCHIP 可选切换查看）
+        self.focusing_rcf_edge      = None   # RCF 边缘响应图（PCHIP 最优 z 处）
+        self.focusing_score_curve   = None   # 聚焦分数-z 曲线图（PCHIP）
         self.focusing_z             = []    # 每个颗粒的聚焦深度位置
         self.focusing_xy            = []    # 每个颗粒的位置框坐标，嵌套列表[[x1,y1,x2,y2],.
         self.focusing_each          = {}

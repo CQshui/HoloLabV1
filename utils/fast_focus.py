@@ -24,6 +24,9 @@ import cv2
 import time
 import numpy as np
 from numpy.fft import fftshift, fft2, ifft2, ifftshift
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import minimize_scalar
 from typing import Callable, Optional, Tuple, List, Dict, Any
@@ -304,7 +307,9 @@ class PeakFinder:
         """主搜索算法，返回最优点 x"""
         initial_points_num = max(5, int(7 * self.initial_points_factor))
 
-        # 初始分段采样
+        # 初始分段采样（不消耗 max_evals 额度，确保 full coverage）
+        saved_max_evals = self.max_evals
+        self.max_evals = float('inf')
         for i in range(initial_points_num):
             segment_start = self.lb + i * (self.ub - self.lb) / initial_points_num
             segment_end = self.lb + (i + 1) * (self.ub - self.lb) / initial_points_num
@@ -313,6 +318,9 @@ class PeakFinder:
 
         # 添加中心点
         self.evaluate((self.lb + self.ub) / 2)
+
+        # 恢复 max_evals，追加已消耗的初始点数量，保证迭代精修有完整预算
+        self.max_evals = saved_max_evals + self.eval_count
 
         stagnation_count = 0
         prev_best_y = float('inf') if self.target == 'min' else float('-inf')
@@ -511,34 +519,36 @@ class FastFocusPCHIP:
         """复振幅场 U → 打分用实数图像（numpy 版）。
 
         - 'amplitude'  : |U|（传统振幅）
-        - 'sobolev_h1' : √((1-γ)|U|² + γ|∇U|²)，复振幅梯度模方融合振幅与相位梯度。
-          由 O=A·e^{iφ} ⇒ |∇O|²=(∇A)²+(A∇φ)²，无需显式分离相位。
+        - 'sobolev_h1' : √((1-γ)·A_norm + γ·M_norm)，其中 A=|U|²、M=|∇U|² 各自归一化到
+          [0,1] 后再混合。γ=0 纯振幅，γ=1 纯梯度，0.5 两通道等权重。
         """
         if self.focus_field == 'sobolev_h1':
             gamma = self.gamma
-            grad_x = U - np.roll(U, 1, axis=-1)   # 沿 x 方向差分
-            grad_y = U - np.roll(U, 1, axis=-2)   # 沿 y 方向差分
-            M = np.abs(grad_x) ** 2 + np.abs(grad_y) ** 2  # |∇U|²
-            return np.sqrt((1 - gamma) * np.abs(U) ** 2 + gamma * M)
+            grad_x = U - np.roll(U, 1, axis=-1)
+            grad_y = U - np.roll(U, 1, axis=-2)
+            M = np.abs(grad_x) ** 2 + np.abs(grad_y) ** 2   # |∇U|²
+            A = np.abs(U) ** 2                               # |U|²
+            # 各自归一化，使 γ 在幅值与梯度间真正线性调度
+            a_max, m_max = A.max(), M.max()
+            if a_max > 0:
+                A = A / a_max
+            if m_max > 0:
+                M = M / m_max
+            # 反色：梯度大的地方输出暗（深色边缘），与传统边缘可视化一致
+            return np.sqrt((1 - gamma) * A + gamma * (1 - M))
         return np.abs(U)
 
-    def _rcf_predict_single(self, amplitude: np.ndarray) -> float:
+    def _rcf_predict_single(self, amplitude: np.ndarray) -> Tuple[float, np.ndarray]:
         """
-        对单张振幅图做 RCF 边缘预测，返回聚焦分数
-
-        Parameters
-        ----------
-        amplitude : np.ndarray
-            重建振幅图（已经是 1/k_size 尺寸）
+        对单张振幅图做 RCF 边缘预测。
 
         Returns
         -------
-        float
-            聚焦分数 = 边缘响应图的亮度集中度（非零像素方差）
-            越大表示越聚焦
+        (concentration, edge_map)
+            concentration: 聚焦分数（边缘亮度集中度）
+            edge_map: RCF 边缘响应图 (H, W) float [0,1]，缩略图尺寸
         """
         # 1. 准备输入：灰度图 → RGB 三通道，转为 float32
-        #    注意：重建已经是在缩小后的尺寸上做的，无需再次 resize
         img_rgb = cv2.cvtColor(amplitude, cv2.COLOR_GRAY2RGB).astype(np.float32)
         img_np = prepare_image_PIL(img_rgb)  # (3, H, W), float32 numpy array
         img_tensor = torch.from_numpy(img_np).unsqueeze(0).to(self.device)  # (1, 3, H, W)
@@ -546,19 +556,14 @@ class FastFocusPCHIP:
         # 2. RCF 推理
         with torch.no_grad():
             results = self.rcf_model(img_tensor)
-            result = torch.squeeze(results[-1].detach()).cpu().numpy()
+            edge_map = torch.squeeze(results[-1].detach()).cpu().numpy()
 
         # 3. 计算亮度集中度
-        result_pil = Image.fromarray((result * 255).astype(np.uint8))
-
-        # 保存 RCF edge map 到 tmp 目录
-        os.makedirs('tmp/rcf_results', exist_ok=True)
-        timestamp = time.time()
-        result_pil.save(f'tmp/rcf_results/rcf_edge_{timestamp:.4f}.png')
-
+        edge_uint8 = (edge_map * 255).astype(np.uint8)
+        result_pil = Image.fromarray(edge_uint8)
         concentration = calculate_brightness_concentration(np.array(result_pil))
 
-        return concentration
+        return concentration, edge_map
 
     def _evaluate_at_z(self, z: float, scale=None) -> float:
         """
@@ -588,7 +593,7 @@ class FastFocusPCHIP:
         img_uint8 = (normalized * 255).astype(np.uint8)
 
         # 3. RCF 边缘预测 + 计算聚焦分数
-        concentration = self._rcf_predict_single(img_uint8)
+        concentration, _ = self._rcf_predict_single(img_uint8)
 
         # 4. 记录历史
         self._z_history.append(z)
@@ -637,6 +642,35 @@ class FastFocusPCHIP:
         self._optimal_image_full = cv2.resize(self._optimal_image, full_size,
                                                interpolation=cv2.INTER_LINEAR)
 
+        # Sobolev H¹ 特征图（仅在 sobolev_h1 模式下生成）
+        self._sobolev_image_full = None
+        if self.focus_field == 'sobolev_h1':
+            score_img = self._propagate_for_score(optimal_z)
+            abs_v = np.abs(score_img)
+            if abs_v.max() > abs_v.min():
+                norm = (abs_v - abs_v.min()) / (abs_v.max() - abs_v.min())
+            else:
+                norm = abs_v
+            sobolev_small = (norm * 255).astype(np.uint8)
+            self._sobolev_image_full = cv2.resize(sobolev_small, full_size,
+                                                   interpolation=cv2.INTER_LINEAR)
+
+        # RCF 边缘响应图（最优 z 处）
+        self._rcf_edge_map_full = None
+        score_img = self._propagate_for_score(optimal_z)
+        abs_v = np.abs(score_img)
+        if abs_v.max() > abs_v.min():
+            norm = (abs_v - abs_v.min()) / (abs_v.max() - abs_v.min())
+        else:
+            norm = abs_v
+        _, edge_map = self._rcf_predict_single((norm * 255).astype(np.uint8))
+        edge_uint8 = (edge_map * 255).astype(np.uint8)
+        self._rcf_edge_map_full = cv2.resize(edge_uint8, full_size,
+                                              interpolation=cv2.INTER_LINEAR)
+
+        # 分数-z 优化曲线
+        self._score_curve_image = self._plot_score_curve()
+
         # 状态信息
         self._hologram.status_msg = (
             f"Fast Focus (PCHIP) Done. "
@@ -656,6 +690,36 @@ class FastFocusPCHIP:
     def get_history(self) -> Tuple[List[float], List[float]]:
         """获取搜索历史"""
         return self._z_history, self._metric_history
+
+    def _plot_score_curve(self) -> Optional[np.ndarray]:
+        """生成 PCHIP 聚焦分数-z 曲线图（BGR uint8）。"""
+        if len(self._z_history) < 2:
+            return None
+        z_arr = np.array(self._z_history)
+        s_arr = np.array(self._metric_history)
+        idx = np.argsort(z_arr)
+        z_sorted, s_sorted = z_arr[idx], s_arr[idx]
+
+        fig, ax = plt.subplots(figsize=(5, 3))
+        ax.plot(z_sorted * 1e6, s_sorted, 'o-', markersize=4, color='#0078D7')
+        best_idx = np.argmax(s_sorted)
+        ax.plot(z_sorted[best_idx] * 1e6, s_sorted[best_idx], 'r*', markersize=12,
+                label=f'Best z={z_sorted[best_idx]*1e6:.1f}um')
+        # 用完整搜索范围设 x 轴，而不是只显示已评估点
+        ax.set_xlim(self.z_start * 1e6, self.z_end * 1e6)
+        ax.set_xlabel('z (um)')
+        ax.set_ylabel('Focus Score')
+        ax.set_title('PCHIP Focus Score vs z')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        fig.canvas.draw()
+        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        plt.close(fig)
+        return img
 
 
 # ====================================================================
@@ -760,7 +824,7 @@ class FastFocusPCHIP_GPU(FastFocusPCHIP):
     #     return cp.asnumpy(cp.abs(U))
     # -------------------------------------------------------------------'''
 
-    def _rcf_predict_single(self, amplitude: np.ndarray) -> float:
+    def _rcf_predict_single(self, amplitude: np.ndarray) -> Tuple[float, np.ndarray]:
         """RCF 边缘预测（已在 GPU 上，与 CPU 版相同）"""
         return super()._rcf_predict_single(amplitude)
 

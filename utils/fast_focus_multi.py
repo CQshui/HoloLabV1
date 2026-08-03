@@ -273,15 +273,22 @@ class MultiFocusPCHIP:
         """复振幅场 U → 打分用实数图像（numpy 版）。
 
         - 'amplitude'  : |U|（传统振幅）
-        - 'sobolev_h1' : √((1-γ)|U|² + γ|∇U|²)，复振幅梯度模方融合振幅与相位梯度。
-          由 O=A·e^{iφ} ⇒ |∇O|²=(∇A)²+(A∇φ)²，无需显式分离相位。
+        - 'sobolev_h1' : √((1-γ)·A_norm + γ·M_norm)，A=|U|² 和 M=|∇U|² 各自归一化到
+          [0,1] 后混合，γ 在两通道间真正线性调度。
         """
         if self.focus_field == 'sobolev_h1':
             gamma = self.gamma
-            grad_x = U - np.roll(U, 1, axis=-1)   # 沿 x
-            grad_y = U - np.roll(U, 1, axis=-2)   # 沿 y
-            M = np.abs(grad_x) ** 2 + np.abs(grad_y) ** 2  # |∇U|²
-            return np.sqrt((1 - gamma) * np.abs(U) ** 2 + gamma * M)
+            grad_x = U - np.roll(U, 1, axis=-1)
+            grad_y = U - np.roll(U, 1, axis=-2)
+            M = np.abs(grad_x) ** 2 + np.abs(grad_y) ** 2
+            A = np.abs(U) ** 2
+            a_max, m_max = A.max(), M.max()
+            if a_max > 0:
+                A = A / a_max
+            if m_max > 0:
+                M = M / m_max
+            # 反色：梯度大的地方输出暗（深色边缘），与传统边缘可视化一致
+            return np.sqrt((1 - gamma) * A + gamma * (1.0 - M))
         return np.abs(U)
 
     def _crop_particle(self, image: np.ndarray, bbox: Tuple[int, int, int, int],
@@ -574,6 +581,29 @@ class MultiFocusPCHIP:
 
         # resize 回全尺寸
         self.focusing = cv2.resize(focusing_small, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
+
+        # Sobolev H¹ 版本（仅在 sobolev_h1 模式下生成，可选查看）
+        self.focusing_sobolev = None
+        self.focusing_each_sobolev = {}
+        if self.focus_field == 'sobolev_h1' and best_zs:
+            score_images = self._batch_reconstruct_for_score(list(best_zs))
+            focusing_small_s = np.zeros((h_small, w_small), dtype=np.uint8)
+            for pid, best_z, pdata in particle_final_info:
+                full_img_s = score_images.get(best_z)
+                if full_img_s is None:
+                    continue
+                x1, y1, x2, y2 = pdata['positions']
+                crop_s = self._crop_particle(full_img_s, (x1, y1, x2, y2), margin=0)
+                abs_v = np.abs(crop_s)
+                if abs_v.max() > abs_v.min():
+                    normalized = (abs_v - abs_v.min()) / (abs_v.max() - abs_v.min())
+                else:
+                    normalized = abs_v
+                crop_s_uint8 = (normalized * 255).astype(np.uint8)
+                focusing_small_s[y1:y2, x1:x2] = crop_s_uint8
+                self.focusing_each_sobolev[f"Particle_{pid}"] = crop_s_uint8
+            self.focusing_sobolev = cv2.resize(focusing_small_s, (w_full, h_full),
+                                                interpolation=cv2.INTER_LINEAR)
 
         elapsed = time.time() - start_time
         self._hologram.status_msg = (

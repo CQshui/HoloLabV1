@@ -656,8 +656,16 @@ class Holo_Processor(QObject):
             img_dict.pop(img_key, None)  # 如果 key 已存在，先删除它（避免重复）
             img_dict = {img_key: img, **img_dict}  # 重建字典，确保新键在最前面
 
+        # 追加可视化结果（滑块切换查看）
+        if getattr(self.hologram, 'focusing_sobolev', None) is not None:
+            img_dict["Focusing (Sobolev H1)"] = self.hologram.focusing_sobolev
+        if getattr(self.hologram, 'focusing_rcf_edge', None) is not None:
+            img_dict["Focusing (RCF Edge)"] = self.hologram.focusing_rcf_edge
+        if getattr(self.hologram, 'focusing_score_curve', None) is not None:
+            img_dict["Score vs z Curve"] = self.hologram.focusing_score_curve
+
         self.images["Focusing"] = img_dict
-        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)  # 显示等待动画等
+        self.image_ready.emit(img_key, img_dict, self.hologram.status_msg)
     def _show_segmentation(self):
         if self.hologram.segmentation_each == {}:
             img_key = "Segmentation"

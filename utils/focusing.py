@@ -262,11 +262,14 @@ class Focusing:
         self.save_to_file()
 
     def modify_hologram_and_config(self):
-        self._hologram.focusing      = self.focusing
-        self._hologram.focusing_z    = self.focusing_z
-        self._hologram.focusing_xy   = self.focusing_xy
-        self._hologram.focusing_each = self.focusing_each
-        self._hologram.status_msg    = f"Focusing Finished."
+        self._hologram.focusing            = self.focusing
+        self._hologram.focusing_z          = self.focusing_z
+        self._hologram.focusing_xy         = self.focusing_xy
+        self._hologram.focusing_each       = self.focusing_each
+        self._hologram.focusing_sobolev    = getattr(self, 'focusing_sobolev', None)
+        self._hologram.focusing_rcf_edge   = getattr(self, 'focusing_rcf_edge', None)
+        self._hologram.focusing_score_curve= getattr(self, 'focusing_score_curve', None)
+        self._hologram.status_msg          = f"Focusing Finished."
 
     def save_to_file(self):
 
@@ -945,52 +948,36 @@ class Focusing:
     # PCHIP 快速自聚焦方法
     # ========================================================================
     def AutoFocusing_PCHIP(self):
-        """
-        PCHIP 快速自聚焦（CPU 版）
-
-        假设所有颗粒位于同一聚焦面，利用 PCHIP 插值代理模型
-        搜索最优聚焦深度 z，仅需 ~30 次单截面重建即可找到全局最优。
-
-        聚焦分数 = RCF 边缘预测 → 亮度集中度（非零像素方差）
-        """
         fast_focus = FastFocusPCHIP(
-            hologram=self._hologram,
-            config=self._config,
+            hologram=self._hologram, config=self._config,
             rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
-            device=self.device,
-            k_size=self.rcf_scale
-        )
+            device=self.device, k_size=self.rcf_scale)
         image, optimal_z = fast_focus.run()
 
         self.focusing = image
         self.focusing_z = [optimal_z]
         self.focusing_each = {}
-
+        self.focusing_sobolev = getattr(fast_focus, '_sobolev_image_full', None)
+        self.focusing_rcf_edge = getattr(fast_focus, '_rcf_edge_map_full', None)
+        self.focusing_score_curve = getattr(fast_focus, '_score_curve_image', None)
         return image
 
     def AutoFocusing_PCHIP_GPU(self):
-        """
-        PCHIP 快速自聚焦（GPU 版，使用 CuPy 加速角谱法重建）
-        RCF 推理仍使用 PyTorch GPU
-        """
         try:
             fast_focus = FastFocusPCHIP_GPU(
-                hologram=self._hologram,
-                config=self._config,
+                hologram=self._hologram, config=self._config,
                 rcf_model=(self.rcfModel if hasattr(self, 'rcfModel') else None),
-                device=self.device,
-                k_size=self.rcf_scale
-            )
+                device=self.device, k_size=self.rcf_scale)
             image, optimal_z = fast_focus.run()
 
             self.focusing = image
             self.focusing_z = [optimal_z]
             self.focusing_each = {}
-
+            self.focusing_sobolev = getattr(fast_focus, '_sobolev_image_full', None)
+            self.focusing_rcf_edge = getattr(fast_focus, '_rcf_edge_map_full', None)
+            self.focusing_score_curve = getattr(fast_focus, '_score_curve_image', None)
             return image
-
         except ImportError:
-            print("[Warning] CuPy not available, falling back to CPU PCHIP focusing.")
             return self.AutoFocusing_PCHIP()
     # ========================================================================
     # Multi_PCHIP 多颗粒 PCHIP 自聚焦
@@ -1002,6 +989,8 @@ class Focusing:
         self.focusing_z = focuser.focusing_z
         self.focusing_xy = focuser.focusing_xy
         self.focusing_each = focuser.focusing_each
+        self.focusing_sobolev = getattr(focuser, 'focusing_sobolev', None)
+        self.focusing_each_sobolev = getattr(focuser, 'focusing_each_sobolev', {})
         return self.focusing
 
     def AutoFocusing_Multi_PCHIP_GPU(self):
@@ -1012,9 +1001,10 @@ class Focusing:
             self.focusing_z = focuser.focusing_z
             self.focusing_xy = focuser.focusing_xy
             self.focusing_each = focuser.focusing_each
+            self.focusing_sobolev = getattr(focuser, 'focusing_sobolev', None)
+            self.focusing_each_sobolev = getattr(focuser, 'focusing_each_sobolev', {})
             return self.focusing
         except ImportError:
-            print("[Warning] CuPy not available, falling back to CPU Multi_PCHIP.")
             return self.AutoFocusing_Multi_PCHIP()
 
 def batch_Focusing(root=r'F:\lichenghao\data', method='AI_GPU'):
